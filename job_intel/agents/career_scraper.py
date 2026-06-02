@@ -1,24 +1,39 @@
-"""Agent 1b: scrape career pages in parallel with Playwright, extract with Claude Haiku."""
+"""Agent: scrape career pages in parallel with Playwright, extract with Claude Haiku."""
 from __future__ import annotations
 
 import asyncio
 import hashlib
 import json
+import logging
 import re
 from datetime import datetime, timezone
 from typing import List, Tuple
+from urllib.parse import urljoin
 
+import httpx
 from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import HumanMessage
+from rich.console import Console
+from rich.progress import BarColumn, Progress, SpinnerColumn, TaskProgressColumn, TextColumn
 
 from job_intel.core.state import AgentState, Company, JobListing
 from job_intel.db.store import save_job_listings
 
-_JSON_ARRAY_RE = re.compile(r"\[.*?\]", re.DOTALL)
-_MAX_PAGE_CHARS = 12_000
+_log = logging.getLogger(__name__)
+_console = Console()
+
+_MAX_PAGE_CHARS = 20_000
 _NAV_TIMEOUT_MS = 30_000
-_MAX_SCRAPERS = 5   # concurrent browser pages
-_MAX_LLM = 3        # concurrent LLM extraction calls
+_NETWORKIDLE_TIMEOUT_MS = 8_000
+_MAX_SCRAPERS = 5    # concurrent browser pages
+_MAX_LLM = 3         # concurrent LLM extraction calls
+_USER_AGENT = (
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+)
+
+_HREF_RE = re.compile(r'href=["\']([^"\'#][^"\']*)["\']', re.IGNORECASE)
+_JSON_ARRAY_RE = re.compile(r"\[.*\]", re.DOTALL)
 
 
 def _make_id(company: str, title: str, location: str) -> str:
@@ -29,16 +44,58 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _extract_links(html: str, base_url: str) -> str:
+    """Pull job-relevant <a href> links from raw HTML and return as a newline list."""
+    hrefs = _HREF_RE.findall(html)
+    job_links: List[str] = []
+    seen: set[str] = set()
+    for href in hrefs:
+        href = href.strip()
+        if not href or href.startswith("javascript"):
+            continue
+        full = urljoin(base_url, href)
+        lower = href.lower()
+        if any(
+            kw in lower
+            for kw in ("job", "career", "position", "role", "opening",
+                       "vacancy", "apply", "requisition", "hiring")
+        ):
+            if full not in seen:
+                seen.add(full)
+                job_links.append(full)
+    return "\n".join(job_links[:150])  # cap to keep prompt manageable
+
+
+# ── httpx plain-HTTP fallback ──────────────────────────────────────────────────
+
+def _httpx_fallback(url: str) -> str:
+    """Try a plain HTTP GET for sites that block headless browsers (e.g. 403)."""
+    try:
+        r = httpx.get(
+            url,
+            headers={"User-Agent": _USER_AGENT},
+            timeout=15,
+            follow_redirects=True,
+        )
+        if r.status_code == 200:
+            # Strip HTML tags to get readable text
+            text = re.sub(r"<[^>]+>", " ", r.text)
+            text = re.sub(r"\s+", " ", text).strip()
+            return text[:_MAX_PAGE_CHARS]
+    except Exception as exc:
+        _log.debug("httpx fallback failed for %s: %s", url, exc)
+    return ""
+
+
 # ── Playwright scraping ────────────────────────────────────────────────────────
 
-async def _fetch_page(url: str, browser, scrape_sem: asyncio.Semaphore) -> Tuple[str, str | None]:
-    """Return (page_text, error). Uses one browser context per URL."""
+async def _fetch_page(
+    url: str, browser, scrape_sem: asyncio.Semaphore
+) -> Tuple[str, str, str | None]:
+    """Return (page_text, page_links, error). Uses one browser context per URL."""
     async with scrape_sem:
         ctx = await browser.new_context(
-            user_agent=(
-                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-                "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-            ),
+            user_agent=_USER_AGENT,
             java_script_enabled=True,
         )
         page = await ctx.new_page()
@@ -46,25 +103,38 @@ async def _fetch_page(url: str, browser, scrape_sem: asyncio.Semaphore) -> Tuple
             resp = await page.goto(
                 url, timeout=_NAV_TIMEOUT_MS, wait_until="domcontentloaded"
             )
-            # Abort early on hard blocks
+
+            # Handle hard blocks — try httpx fallback on 403
             if resp and resp.status in (401, 403, 404):
-                return "", f"HTTP {resp.status}"
+                if resp.status == 403:
+                    fallback_text = await asyncio.to_thread(_httpx_fallback, url)
+                    if fallback_text:
+                        _log.debug("httpx fallback succeeded for %s", url)
+                        return fallback_text, "", None
+                return "", "", f"HTTP {resp.status}"
 
-            # Give JS-heavy pages time to render dynamic content
-            await page.wait_for_timeout(2_500)
+            # Wait for JS-rendered content to settle
+            try:
+                await page.wait_for_load_state("networkidle", timeout=_NETWORKIDLE_TIMEOUT_MS)
+            except Exception:
+                pass  # continue with whatever rendered so far
 
-            # Scroll once to trigger lazy-loaded listings
+            # Multi-scroll to trigger lazy-loaded listings
             await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
             await page.wait_for_timeout(1_000)
+            await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+            await page.wait_for_timeout(500)
 
             text = await page.inner_text("body")
-            return text[:_MAX_PAGE_CHARS], None
+            html = await page.content()
+            links = _extract_links(html, url)
+
+            return text[:_MAX_PAGE_CHARS], links, None
 
         except asyncio.TimeoutError:
-            return "", "timeout"
+            return "", "", "timeout"
         except Exception as exc:
-            short = str(exc)[:120]
-            return "", short
+            return "", "", str(exc)[:120]
         finally:
             await ctx.close()
 
@@ -75,14 +145,21 @@ def _extract_jobs(
     company: str,
     career_url: str,
     page_text: str,
+    page_links: str,
     inferred_field: str,
     location: str,
 ) -> List[JobListing]:
-    """Send page text to Claude Haiku; return filtered, typed JobListings."""
-    if not page_text:
+    """Send page content to Claude Haiku; return filtered, typed JobListings."""
+    if not page_text and not page_links:
         return []
 
     llm = ChatAnthropic(model="claude-haiku-4-5-20251001", temperature=0)
+
+    links_section = (
+        f"\nEXTRACTED JOB-RELATED LINKS FROM PAGE:\n{page_links}"
+        if page_links
+        else "\nEXTRACTED JOB-RELATED LINKS: (none found)"
+    )
 
     prompt = f"""You are reviewing {company}'s careers page: {career_url}
 
@@ -95,13 +172,15 @@ Include a listing ONLY if BOTH conditions are met:
 1. Role is relevant to the candidate's field (see above)
 2. Location mentions "{location}", "India", "Remote", "Anywhere", "Hybrid", or is unspecified
 
-For each matching listing output a JSON object:
-  "title"       : job title (string)
-  "location"    : location as shown on the page, or "Not specified" (string)
-  "url"         : direct link to the posting; fall back to "{career_url}" if none visible (string)
-  "description" : first 200 chars of the job summary or description; "" if not available (string)
+For each matching listing output a JSON object with these exact keys:
+  "title"       : job title as written on the page (string)
+  "location"    : location exactly as shown, or "Not specified" if truly absent (string)
+  "url"         : use the most specific direct link to this posting from the LINKS section below;
+                  only fall back to "{career_url}" if no better URL exists (string)
+  "description" : first 200 chars of the job summary or requirements; "" if unavailable (string)
 
 Output ONLY a valid JSON array. If nothing matches, output [].
+{links_section}
 
 PAGE TEXT:
 {page_text}"""
@@ -113,7 +192,8 @@ PAGE TEXT:
         if not match:
             return []
         items = json.loads(match.group())
-    except Exception:
+    except Exception as exc:
+        _log.debug("LLM extraction failed for %s: %s", company, exc)
         return []
 
     now = _now_iso()
@@ -150,24 +230,33 @@ async def _process_company(
     llm_sem: asyncio.Semaphore,
     inferred_field: str,
     location: str,
+    progress: Progress,
+    overall_task,
 ) -> Tuple[List[JobListing], List[str]]:
     name = company["name"]
     url = company["career_url"]
 
-    page_text, error = await _fetch_page(url, browser, scrape_sem)
+    page_text, page_links, error = await _fetch_page(url, browser, scrape_sem)
 
     if error:
         label = "timeout" if "timeout" in error.lower() else f"error ({error})"
-        print(f"  [scraper] {name}: {label}")
+        progress.console.print(f"  [red]✗[/red] [dim]{name}[/dim]: {label}")
+        progress.advance(overall_task)
         return [], [f"career_scraper [{name}]: {error}"]
 
     async with llm_sem:
         listings = await asyncio.to_thread(
-            _extract_jobs, name, url, page_text, inferred_field, location
+            _extract_jobs, name, url, page_text, page_links, inferred_field, location
         )
 
-    status = f"{len(listings)} match(es)" if listings else "no relevant listings"
-    print(f"  [scraper] {name}: {status}")
+    if listings:
+        progress.console.print(
+            f"  [green]✓[/green] [bold]{name}[/bold]: {len(listings)} listing(s)"
+        )
+    else:
+        progress.console.print(f"  [yellow]–[/yellow] [dim]{name}[/dim]: no relevant listings")
+
+    progress.advance(overall_task)
     return listings, []
 
 
@@ -177,20 +266,36 @@ async def _scrape_all(
     companies: List[Company],
     inferred_field: str,
     location: str,
+    run_id: str,
 ) -> Tuple[List[JobListing], List[str]]:
     from playwright.async_api import async_playwright
 
     scrape_sem = asyncio.Semaphore(_MAX_SCRAPERS)
     llm_sem = asyncio.Semaphore(_MAX_LLM)
 
-    async with async_playwright() as pw:
-        browser = await pw.chromium.launch(headless=True)
-        tasks = [
-            _process_company(c, browser, scrape_sem, llm_sem, inferred_field, location)
-            for c in companies
-        ]
-        raw_results = await asyncio.gather(*tasks, return_exceptions=True)
-        await browser.close()
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TaskProgressColumn(),
+        console=_console,
+        transient=False,
+    ) as progress:
+        overall_task = progress.add_task(
+            f"[cyan]Scraping {len(companies)} career pages...", total=len(companies)
+        )
+
+        async with async_playwright() as pw:
+            browser = await pw.chromium.launch(headless=True)
+            tasks = [
+                _process_company(
+                    c, browser, scrape_sem, llm_sem,
+                    inferred_field, location, progress, overall_task
+                )
+                for c in companies
+            ]
+            raw_results = await asyncio.gather(*tasks, return_exceptions=True)
+            await browser.close()
 
     all_listings: List[JobListing] = []
     all_errors: List[str] = []
@@ -213,21 +318,18 @@ def scrape_careers_node(state: AgentState) -> dict:
     resume_data = state.get("resume_data", {})
     inferred_field = resume_data.get("inferred_field", "Machine Learning")
     location = state.get("location", "India")
+    run_id = state.get("run_id", "")
 
     if not companies:
         return {"job_listings": [], "errors": ["career_scraper: no companies in state"]}
 
-    print(f"\n[career_scraper] scraping {len(companies)} companies in parallel...")
-
     listings, errors = asyncio.run(
-        _scrape_all(companies, inferred_field, location)
+        _scrape_all(companies, inferred_field, location, run_id)
     )
-
-    print(f"[career_scraper] done — {len(listings)} relevant listing(s) total\n")
 
     if listings:
         try:
-            save_job_listings(listings)
+            save_job_listings(listings, run_id=run_id)
         except Exception as exc:
             errors.append(f"career_scraper: DB save failed: {exc}")
 

@@ -14,7 +14,7 @@ class ResumeData(TypedDict):
     skills: List[str]       # e.g. ["Python", "PyTorch", "Docker"]
     stack: List[str]        # e.g. ["AWS", "Kubernetes", "MLflow"]
     inferred_field: str     # e.g. "MLOps Engineering"
-    seniority_level: str    # "junior" | "mid" | "senior"
+    seniority_level: str    # "junior" | "mid" | "senior" | "lead/principal"
 
 
 class Company(TypedDict):
@@ -36,12 +36,37 @@ class JobListing(TypedDict):
     scraped_at: str   # ISO-8601 UTC timestamp
 
 
+class RankedJobListing(TypedDict):
+    """A job listing enriched with a relevance score."""
+
+    id: str
+    company: str
+    title: str
+    location: str
+    url: str
+    description: str
+    scraped_at: str
+    score: int          # 0–12 composite score
+    score_reason: str   # human-readable explanation
+
+
+class OutreachDraft(TypedDict):
+    """A tailored cold outreach message for a specific job listing."""
+
+    company: str
+    title: str
+    message: str        # ~150-word personalised outreach
+
+
 class AgentState(TypedDict):
     """Shared state flowing through the LangGraph pipeline."""
 
-    resume_path: str                                        # path to input PDF
-    location: str                                           # e.g. "London"
-    resume_data: ResumeData                                 # populated by resume_parser
-    companies: List[Company]                                # populated by company_finder
-    job_listings: List[JobListing]                          # populated by career_scraper
-    errors: Annotated[List[str], operator.add]              # accumulated across nodes
+    resume_path: str                                             # path to input PDF
+    location: str                                               # e.g. "Bangalore"
+    run_id: str                                                 # UUID per pipeline run (for stale-listing cleanup)
+    resume_data: ResumeData                                     # populated by resume_parser
+    companies: List[Company]                                    # populated by company_finder
+    job_listings: List[JobListing]                              # populated by career_scraper
+    ranked_listings: List[RankedJobListing]                     # populated by job_scorer
+    outreach_drafts: List[OutreachDraft]                        # populated by outreach_drafter
+    errors: Annotated[List[str], operator.add]                  # accumulated across nodes

@@ -1,18 +1,20 @@
 # Job Intel Agent
 
-A multi-agent job intelligence pipeline built with [LangGraph](https://github.com/langchain-ai/langgraph) and Claude. Given a resume PDF and a target location, it automatically identifies relevant companies, scrapes their career pages, and surfaces matching job listings.
+A multi-agent job intelligence pipeline built with [LangGraph](https://github.com/langchain-ai/langgraph) and Claude. Given a resume PDF and a target location, it automatically identifies relevant companies, scrapes their career pages, scores and ranks matching job listings, and drafts personalised cold outreach messages.
 
 ## How it works
 
-The pipeline runs three agents in sequence:
+The pipeline runs five agents in sequence:
 
 ```
-Resume PDF → parse_resume → find_companies → scrape_careers → Job Listings
+Resume PDF → parse_resume → find_companies → scrape_careers → score_jobs → draft_outreach
 ```
 
 1. **`parse_resume`** — Extracts structured data from your resume PDF: name, current role, years of experience, skills, tech stack, inferred field, and seniority level.
-2. **`find_companies`** — Uses the resume profile to search for companies in the target location that are likely hiring for your background.
-3. **`scrape_careers`** — Visits each company's careers page and extracts relevant job listings, persisting them to a local SQLite database.
+2. **`find_companies`** — Uses the resume profile to search for companies in the target location that are actively hiring for your background. Prioritises local/remote-friendly employers and filters out companies known not to hire in the target region.
+3. **`scrape_careers`** — Visits each company's careers page in parallel with Playwright, extracts job listings (with real listing URLs, locations, and descriptions), and persists them to SQLite. Falls back to a plain HTTP request for sites that block headless browsers.
+4. **`score_jobs`** — Scores every listing against your profile on four dimensions (title match, skill overlap, location fit, seniority fit) and returns a ranked shortlist of the top 5.
+5. **`draft_outreach`** — Writes a tailored ~150-word cold outreach message for each of the top 3 listings using Claude Sonnet.
 
 ## Requirements
 
@@ -33,41 +35,56 @@ uv sync
 # Install Playwright browsers (needed for career page scraping)
 uv run playwright install chromium
 
-# Set your API key
-echo "ANTHROPIC_API_KEY=your_key_here" > .env
+# Copy the env template and add your API key
+cp .env.example .env
+# then edit .env and set ANTHROPIC_API_KEY=your_key_here
 ```
 
 ## Usage
 
 ```bash
-uv run python main.py --resume path/to/resume.pdf --location "London"
+uv run python main.py --resume path/to/resume.pdf --location "Bangalore"
 ```
 
-Example output:
+Optionally save the full results to a JSON file:
+
+```bash
+uv run python main.py --resume resume.pdf --location "Bangalore" --output results.json
+```
+
+### Example output
 
 ```
-=== Job Intel  |  resume='resume.pdf'  location='London' ===
+────────────── Job Intel | resume='resume.pdf' location='Bangalore' ──────────────
 
-=== Parsed Resume ===
+──────────────────────────── Parsed Resume ────────────────────────────
   Name            : Jane Doe
   Current role    : MLOps Engineer
   Experience      : 4.0 year(s)
   Inferred field  : MLOps Engineering
   Seniority       : mid
-  Skills          : Python, Docker, Kubernetes, ...
-  Stack           : AWS, MLflow, Airflow, ...
+  Skills          : Python, Docker, Kubernetes, MLflow, ...
+  Stack           : AWS, Airflow, Terraform, ...
 
-=== 8 Companies Targeted ===
-  • Monzo
-  • Revolut
+──────────────────────── 10 Companies Targeted ────────────────────────
+  • Flipkart  →  https://flipkart.com/careers
+  • Swiggy    →  https://careers.swiggy.com
   ...
 
-=== 5 Relevant Job Listing(s) ===
+──────────────────────── Top Ranked Job Listing(s) ────────────────────
 
-  [Monzo]  Senior MLOps Engineer
-  Location    : London, UK
-  URL         : https://monzo.com/careers/...
-  Description : We're looking for an MLOps engineer to ...
+  [Flipkart]  MLOps Engineer  Score: 10/12
+  Location    : Bangalore, India
+  URL         : https://flipkart.com/careers/job/12345
+  Description : Build and maintain ML infrastructure at scale ...
+  Why         : Strong title and skill match; exact location; seniority aligns.
+
+──────────────────────────── Outreach Draft(s) ────────────────────────
+
+  [Flipkart]  MLOps Engineer
+
+    I've spent the last 4 years building ML infrastructure ...
+    ...
 ```
 
 Results are also saved to `job_intel.db` (SQLite) for querying later.
@@ -77,15 +94,18 @@ Results are also saved to `job_intel.db` (SQLite) for querying later.
 ```
 job_intel/
 ├── agents/
-│   ├── resume_parser.py   # Parses resume PDF with Claude
-│   ├── company_finder.py  # Finds target companies via web search
-│   └── career_scraper.py  # Scrapes job listings from career pages
+│   ├── resume_parser.py    # Parses resume PDF with Claude
+│   ├── company_finder.py   # Finds target companies via web search
+│   ├── career_scraper.py   # Scrapes job listings from career pages (Playwright + httpx fallback)
+│   ├── job_scorer.py       # Scores and ranks listings against the candidate profile
+│   └── outreach_drafter.py # Drafts personalised cold outreach messages
 ├── core/
-│   ├── graph.py           # LangGraph pipeline definition
-│   └── state.py           # Shared AgentState TypedDicts
+│   ├── graph.py            # LangGraph pipeline definition
+│   └── state.py            # Shared AgentState TypedDicts
 └── db/
-    └── store.py           # SQLite persistence layer
-main.py                    # CLI entry point
+    └── store.py            # SQLite persistence (resumes, companies, job listings)
+main.py                     # CLI entry point
+.env.example                # Environment variable template
 ```
 
 ## Tech stack
@@ -93,11 +113,12 @@ main.py                    # CLI entry point
 | Layer | Library |
 |---|---|
 | Agent orchestration | LangGraph |
-| LLM | Claude (via `langchain-anthropic`) |
+| LLM | Claude Haiku / Sonnet (via `langchain-anthropic`) |
 | PDF parsing | pdfplumber |
-| Web scraping | Playwright |
+| Web scraping | Playwright + httpx |
 | Web search | DDGS (DuckDuckGo) |
 | Persistence | SQLite via `sqlite-utils` |
+| Terminal UI | Rich |
 
 ## License
 
