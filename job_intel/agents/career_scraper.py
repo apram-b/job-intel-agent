@@ -177,7 +177,7 @@ For each matching listing output a JSON object with these exact keys:
   "location"    : location exactly as shown, or "Not specified" if truly absent (string)
   "url"         : use the most specific direct link to this posting from the LINKS section below;
                   only fall back to "{career_url}" if no better URL exists (string)
-  "description" : first 200 chars of the job summary or requirements; "" if unavailable (string)
+  "description" : first 1000 chars of the job summary or requirements; "" if unavailable (string)
 
 Output ONLY a valid JSON array. If nothing matches, output [].
 {links_section}
@@ -206,7 +206,7 @@ PAGE TEXT:
             continue
         loc = str(item.get("location") or "Not specified").strip()
         url = str(item.get("url") or career_url).strip()
-        desc = str(item.get("description") or "").strip()[:200]
+        desc = str(item.get("description") or "").strip()[:1000]
         listings.append(
             JobListing(
                 id=_make_id(company, title, loc),

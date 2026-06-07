@@ -32,7 +32,7 @@ class JobListing(TypedDict):
     title: str
     location: str
     url: str          # direct link to the listing (or career page if unavailable)
-    description: str  # first 200 chars of job description
+    description: str  # first 1000 chars of job description
     scraped_at: str   # ISO-8601 UTC timestamp
 
 
