@@ -48,6 +48,15 @@ def save_companies(companies: List[Company]) -> None:
     _log.debug("Saved %d companies", len(rows))
 
 
+def _migrate(db: sqlite_utils.Database) -> None:
+    """Apply lightweight schema migrations so old DBs stay compatible."""
+    if "job_listings" in db.table_names():
+        existing_cols = {c.name for c in db["job_listings"].columns}
+        if "run_id" not in existing_cols:
+            db["job_listings"].add_column("run_id", str)
+            _log.info("Migrated job_listings table: added run_id column")
+
+
 def save_job_listings(listings: List[JobListing], *, run_id: str = "") -> None:
     """Upsert job listings into the job_listings table (keyed on id).
 
@@ -57,6 +66,7 @@ def save_job_listings(listings: List[JobListing], *, run_id: str = "") -> None:
     if not listings:
         return
     db = _db()
+    _migrate(db)
     rows = [
         {
             "id": j["id"],

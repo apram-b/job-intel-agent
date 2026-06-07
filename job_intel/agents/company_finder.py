@@ -81,10 +81,23 @@ def _parse_companies(text: str) -> List[Company]:
     return companies
 
 
+def _build_search_keywords(field: str, resume_data: dict) -> str:
+    """Build a compact keyword string from the inferred field and top skills."""
+    skills = resume_data.get("skills", [])
+    # Pick a handful of the most role-defining skills
+    role_skills = [s for s in skills if any(
+        kw in s.lower() for kw in ("mlops", "ml", "data", "pipeline", "model", "llm", "ai")
+    )][:3]
+    parts = [field] + role_skills
+    return " ".join(parts)
+
+
 def find_companies_node(state: AgentState) -> dict:
     """LangGraph node: discover top 15 companies and their career-page URLs."""
-    field = state["resume_data"]["inferred_field"]
+    resume_data = state["resume_data"]
+    field = resume_data["inferred_field"]
     location = state["location"]
+    search_keywords = _build_search_keywords(field, resume_data)
 
     _log.info("Searching for '%s' companies in '%s'...", field, location)
     search_results = _gather_search_results(field, location)
@@ -100,14 +113,26 @@ STRICT RULES:
 - Include a healthy mix: 5 established tech companies, 5 high-growth startups, 5 mid-size product companies.
 - EXCLUDE companies that are well-known to not hire {field} roles in India or that primarily hire only in the US/EU with no remote option (e.g. Figma, Stripe, Uber Eats, Lyft).
 - Prefer companies actively hiring right now based on the search snippets.
-- For each company, provide its careers/jobs page URL. If not directly shown, infer it (e.g. company.com/careers).
+
+CAREER URL RULES (critical):
+- Do NOT just link to the careers homepage. Provide a URL that goes DIRECTLY to filtered job search results.
+- Include the search keywords "{search_keywords}" as query parameters wherever the ATS supports it.
+- Use these known URL patterns as a reference:
+    Google        → https://careers.google.com/jobs/results/?q=MLOps+Machine+Learning
+    Microsoft     → https://jobs.microsoft.com/en-us/search?q=MLOps
+    Amazon / AWS  → https://www.amazon.jobs/en/search?base_query=MLOps
+    Greenhouse    → https://boards.greenhouse.io/{{company}}/jobs?q=MLOps
+    Lever         → https://jobs.lever.co/{{company}}?q=MLOps
+    Workday       → https://{{company}}.wd3.myworkdayjobs.com/en-US/{{company}}_Careers?q=MLOps
+    Generic       → https://company.com/careers?q=MLOps  or  /jobs?search=MLOps
+- If a company's ATS does not support URL-based search, link to the most relevant sub-page (e.g. /careers/engineering or /careers/data).
 
 SEARCH RESULTS:
 {search_results}
 
 Output ONLY a JSON array with exactly 15 entries — no prose, no markdown fences:
 [
-  {{"name": "Company Name", "career_url": "https://company.com/careers"}},
+  {{"name": "Company Name", "career_url": "https://careers.company.com/jobs?q=MLOps"}},
   ...
 ]"""
 
