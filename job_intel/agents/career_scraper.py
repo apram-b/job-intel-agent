@@ -131,11 +131,16 @@ async def _fetch_page(
             except Exception:
                 pass  # continue with whatever rendered so far
 
-            # Multi-scroll to trigger lazy-loaded listings
-            await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-            await page.wait_for_timeout(1_000)
-            await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-            await page.wait_for_timeout(500)
+            # Multi-scroll to trigger lazy-loaded listings; a page that
+            # navigates mid-scroll destroys the JS context — keep whatever
+            # rendered rather than failing the whole company.
+            try:
+                await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                await page.wait_for_timeout(1_000)
+                await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                await page.wait_for_timeout(500)
+            except Exception:
+                pass
 
             text = await page.inner_text("body")
             html = await page.content()
@@ -146,7 +151,8 @@ async def _fetch_page(
         except asyncio.TimeoutError:
             return "", "", "timeout"
         except Exception as exc:
-            err = str(exc)
+            # First line only — Playwright appends a multiline "Call log:"
+            err = str(exc).splitlines()[0].strip()
             # Chromium-specific network failures often succeed over plain HTTP/1.1
             if any(code in err for code in _FALLBACK_NAV_ERRORS):
                 fallback_text, note = await asyncio.to_thread(_httpx_fallback, url)

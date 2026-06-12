@@ -18,7 +18,7 @@ from job_intel.db.store import clean_stale_listings
 
 load_dotenv()
 
-st.set_page_config(page_title="Job Intel Agent", page_icon="🎯", layout="wide")
+st.set_page_config(page_title="Job Intel Agent", page_icon="●", layout="wide")
 
 # Pipeline nodes in execution order, with UI labels
 _STAGES = [
@@ -59,7 +59,7 @@ def _run_pipeline(resume_path: str, location: str) -> dict:
     t_start = time.perf_counter()
     t_stage = t_start
 
-    with st.status(f"⏳ {_STAGES[0][1]}…", expanded=True) as status:
+    with st.status(f"{_STAGES[0][1]}…", expanded=True) as status:
         for update in graph.stream(state, stream_mode="updates"):
             for node_name, node_output in update.items():
                 if node_output:
@@ -73,21 +73,21 @@ def _run_pipeline(resume_path: str, location: str) -> dict:
 
                 now = time.perf_counter()
                 label = stage_labels.get(node_name, node_name)
-                st.write(f"✅ {label} — {_fmt_secs(now - t_stage)}")
+                st.write(f"✓ {label} — {_fmt_secs(now - t_stage)}")
                 t_stage = now
 
                 # Show the next stage as running, with total elapsed time
                 try:
                     next_label = _STAGES[node_order.index(node_name) + 1][1]
                     status.update(
-                        label=f"⏳ {next_label}… ({_fmt_secs(now - t_start)} elapsed)"
+                        label=f"{next_label}… ({_fmt_secs(now - t_start)} elapsed)"
                     )
                 except (ValueError, IndexError):
                     pass
 
         total = time.perf_counter() - t_start
         status.update(
-            label=f"✅ Pipeline complete in {_fmt_secs(total)}",
+            label=f"Pipeline complete in {_fmt_secs(total)}",
             state="complete",
             expanded=True,
         )
@@ -105,7 +105,7 @@ def _run_pipeline(resume_path: str, location: str) -> dict:
 def _render_results(result: dict) -> None:
     resume = result.get("resume_data")
     if resume:
-        st.subheader("📄 Parsed Resume")
+        st.subheader("Parsed Resume")
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Name", resume["name"])
         c2.metric("Experience", f"{resume['years_experience']} yrs")
@@ -118,44 +118,44 @@ def _render_results(result: dict) -> None:
 
     companies = result.get("companies", [])
     if companies:
-        with st.expander(f"🏢 {len(companies)} Companies Targeted"):
+        with st.expander(f"{len(companies)} Companies Targeted"):
             for c in companies:
                 st.markdown(f"- [{c['name']}]({c['career_url']})")
 
     ranked = result.get("ranked_listings", [])
     listings = ranked if ranked else result.get("job_listings", [])
     if listings:
-        st.subheader(f"💼 {len(listings)} {'Top Ranked' if ranked else 'Relevant'} Job Listing(s)")
+        st.subheader(f"{len(listings)} {'Top Ranked' if ranked else 'Relevant'} Job Listing(s)")
         for j in listings:
-            score_badge = f" — **{j['score']}/12**" if "score" in j else ""
+            score_badge = f" — {j['score']}/12" if "score" in j else ""
             with st.container(border=True):
-                st.markdown(f"### {j['title']}{score_badge}")
+                st.markdown(f"#### {j['title']}{score_badge}")
                 st.markdown(f"**{j['company']}** · {j['location']}")
-                st.link_button("View listing ↗", j["url"])
+                st.link_button("View listing →", j["url"])
                 if j.get("description"):
                     with st.expander("Description"):
                         st.write(j["description"])
                 if j.get("score_reason"):
                     st.caption(j["score_reason"])
     else:
-        st.warning("No relevant job listings found.")
+        st.markdown("*No relevant job listings found.*")
 
     drafts = result.get("outreach_drafts", [])
     if drafts:
-        st.subheader(f"✉️ {len(drafts)} Outreach Draft(s)")
+        st.subheader(f"{len(drafts)} Outreach Draft(s)")
         for d in drafts:
-            st.markdown(f"**[{d['company']}] {d['title']}**")
+            st.markdown(f"**{d['company']}** — {d['title']}")
             st.code(d["message"], language=None, wrap_lines=True)
 
     errors = result.get("errors", [])
     if errors:
-        with st.expander(f"⚠️ {len(errors)} error(s)"):
+        with st.expander(f"{len(errors)} error(s)"):
             for e in errors:
-                st.text(f"! {e}")
+                st.text(f"- {e}")
 
 
 def main() -> None:
-    st.title("🎯 Job Intel Agent")
+    st.title("Job Intel Agent")
     st.caption(
         "Upload your resume, pick a location — the agents find companies, scrape "
         "career pages, rank the best-fit roles, and draft your outreach."
@@ -181,7 +181,7 @@ def main() -> None:
     if "result" in st.session_state:
         _render_results(st.session_state["result"])
     elif not run:
-        st.info("⬅️ Upload a resume PDF and enter a location to get started.")
+        st.markdown("*Upload a resume PDF and enter a location in the sidebar to get started.*")
 
 
 if __name__ == "__main__":
