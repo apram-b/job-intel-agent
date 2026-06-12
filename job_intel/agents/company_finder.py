@@ -1,22 +1,18 @@
 """Agent: find top 15 companies for a field using web search + a single Claude call."""
 from __future__ import annotations
 
-import json
 import logging
-import re
 import time
 from typing import List
 
 from ddgs import DDGS
-from langchain_anthropic import ChatAnthropic
-from langchain_core.messages import HumanMessage
 
+from job_intel.core.llm import extract_json_array, get_llm, invoke_text
 from job_intel.core.state import AgentState, Company
 from job_intel.db.store import save_companies
 
 _log = logging.getLogger(__name__)
 
-_JSON_ARRAY_RE = re.compile(r"\[.*\]", re.DOTALL)
 _SEARCH_DELAY = 0.6   # seconds between DuckDuckGo requests
 
 
@@ -56,14 +52,7 @@ def _gather_search_results(field: str, location: str) -> str:
 
 def _parse_companies(text: str) -> List[Company]:
     """Extract a JSON array of {name, career_url} from arbitrary LLM text."""
-    text = re.sub(r"```(?:json)?", "", text).strip()
-    match = _JSON_ARRAY_RE.search(text)
-    if not match:
-        return []
-    try:
-        items = json.loads(match.group())
-    except json.JSONDecodeError:
-        return []
+    items = extract_json_array(text) or []
 
     companies: List[Company] = []
     for item in items:
@@ -102,7 +91,7 @@ def find_companies_node(state: AgentState) -> dict:
     _log.info("Searching for '%s' companies in '%s'...", field, location)
     search_results = _gather_search_results(field, location)
 
-    llm = ChatAnthropic(model="claude-haiku-4-5-20251001", temperature=0)
+    llm = get_llm()
 
     prompt = f"""You are a job-market researcher helping a {field} professional find companies that actively hire in {location} or fully Remote.
 
@@ -137,9 +126,7 @@ Output ONLY a JSON array with exactly 15 entries — no prose, no markdown fence
 ]"""
 
     try:
-        msg = llm.invoke([HumanMessage(content=prompt)])
-        raw = msg.content if isinstance(msg.content, str) else ""
-        companies = _parse_companies(raw)
+        companies = _parse_companies(invoke_text(llm, prompt))
     except Exception as exc:
         return {"companies": [], "errors": [f"company_finder error: {exc}"]}
 

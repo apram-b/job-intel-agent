@@ -2,22 +2,18 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
-import re
 from typing import List, Tuple
 
 from langchain_anthropic import ChatAnthropic
-from langchain_core.messages import HumanMessage
 
+from job_intel.core.llm import extract_json_object, get_llm, invoke_text
 from job_intel.core.state import AgentState, JobListing, RankedJobListing, ResumeData
 
 _log = logging.getLogger(__name__)
 
 _MAX_LLM = 3   # concurrent scoring calls
 _TOP_N = 5     # how many top listings to surface
-
-_JSON_OBJ_RE = re.compile(r"\{.*\}", re.DOTALL)
 
 
 def _score_listing(
@@ -69,13 +65,9 @@ Output ONLY a JSON object — no prose:
 }}"""
 
     try:
-        msg = llm.invoke([HumanMessage(content=prompt)])
-        raw = msg.content if isinstance(msg.content, str) else ""
-        raw = re.sub(r"```(?:json)?", "", raw).strip()
-        match = _JSON_OBJ_RE.search(raw)
-        if not match:
+        data = extract_json_object(invoke_text(llm, prompt))
+        if data is None:
             return 0, "Could not parse score"
-        data = json.loads(match.group())
         score = (
             int(data.get("title_match", 0))
             + int(data.get("skill_overlap", 0))
@@ -94,23 +86,13 @@ async def _score_all(
     listings: List[JobListing],
     resume: ResumeData,
 ) -> List[RankedJobListing]:
-    llm = ChatAnthropic(model="claude-haiku-4-5-20251001", temperature=0)
+    llm = get_llm()
     sem = asyncio.Semaphore(_MAX_LLM)
 
     async def _score_one(listing: JobListing) -> RankedJobListing:
         async with sem:
             score, reason = await asyncio.to_thread(_score_listing, listing, resume, llm)
-        return RankedJobListing(
-            id=listing["id"],
-            company=listing["company"],
-            title=listing["title"],
-            location=listing["location"],
-            url=listing["url"],
-            description=listing["description"],
-            scraped_at=listing["scraped_at"],
-            score=score,
-            score_reason=reason,
-        )
+        return RankedJobListing(**listing, score=score, score_reason=reason)
 
     ranked = await asyncio.gather(*[_score_one(l) for l in listings])
     return sorted(ranked, key=lambda r: r["score"], reverse=True)

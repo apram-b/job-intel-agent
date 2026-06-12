@@ -6,6 +6,7 @@ Usage:
 from __future__ import annotations
 
 import tempfile
+import time
 import uuid
 from pathlib import Path
 
@@ -29,6 +30,12 @@ _STAGES = [
 ]
 
 
+def _fmt_secs(seconds: float) -> str:
+    if seconds >= 60:
+        return f"{int(seconds // 60)}m {int(seconds % 60)}s"
+    return f"{seconds:.1f}s"
+
+
 def _run_pipeline(resume_path: str, location: str) -> dict:
     """Stream the graph node-by-node, updating a status widget per stage."""
     run_id = str(uuid.uuid4())
@@ -47,8 +54,12 @@ def _run_pipeline(resume_path: str, location: str) -> dict:
 
     result: dict = dict(state)
     stage_labels = dict(_STAGES)
+    node_order = [name for name, _ in _STAGES]
 
-    with st.status("Running pipeline...", expanded=True) as status:
+    t_start = time.perf_counter()
+    t_stage = t_start
+
+    with st.status(f"⏳ {_STAGES[0][1]}…", expanded=True) as status:
         for update in graph.stream(state, stream_mode="updates"):
             for node_name, node_output in update.items():
                 if node_output:
@@ -59,9 +70,27 @@ def _run_pipeline(resume_path: str, location: str) -> dict:
                     for k, v in node_output.items():
                         if k != "errors":
                             result[k] = v
+
+                now = time.perf_counter()
                 label = stage_labels.get(node_name, node_name)
-                st.write(f"✅ {label} — done")
-        status.update(label="Pipeline complete", state="complete", expanded=False)
+                st.write(f"✅ {label} — {_fmt_secs(now - t_stage)}")
+                t_stage = now
+
+                # Show the next stage as running, with total elapsed time
+                try:
+                    next_label = _STAGES[node_order.index(node_name) + 1][1]
+                    status.update(
+                        label=f"⏳ {next_label}… ({_fmt_secs(now - t_start)} elapsed)"
+                    )
+                except (ValueError, IndexError):
+                    pass
+
+        total = time.perf_counter() - t_start
+        status.update(
+            label=f"✅ Pipeline complete in {_fmt_secs(total)}",
+            state="complete",
+            expanded=True,
+        )
 
     try:
         cleaned = clean_stale_listings(run_id)

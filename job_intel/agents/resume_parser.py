@@ -1,18 +1,13 @@
 """Agent: parse a PDF resume into structured ResumeData using pdfplumber + Claude Haiku."""
 from __future__ import annotations
 
-import json
-import re
 from pathlib import Path
 
 import pdfplumber
-from langchain_anthropic import ChatAnthropic
-from langchain_core.messages import HumanMessage
 
+from job_intel.core.llm import extract_json_object, get_llm, invoke_text
 from job_intel.core.state import AgentState, ResumeData
 from job_intel.db.store import save_resume
-
-_JSON_RE = re.compile(r"\{.*\}", re.DOTALL)
 
 
 def _extract_pdf_text(path: str) -> str:
@@ -26,7 +21,7 @@ def _parse_with_llm(resume_text: str) -> ResumeData:
     from datetime import date
     today = date.today().isoformat()
 
-    llm = ChatAnthropic(model="claude-haiku-4-5-20251001", temperature=0)
+    llm = get_llm()
 
     prompt = f"""You are a resume parser. Today's date is {today}.
 
@@ -55,14 +50,10 @@ Other guidelines:
 RESUME:
 {resume_text}"""
 
-    msg = llm.invoke([HumanMessage(content=prompt)])
-    raw = msg.content if isinstance(msg.content, str) else ""
-
-    match = _JSON_RE.search(raw)
-    if not match:
+    raw = invoke_text(llm, prompt)
+    data = extract_json_object(raw)
+    if data is None:
         raise ValueError(f"LLM did not return a JSON object. Response:\n{raw[:500]}")
-
-    data = json.loads(match.group())
 
     years = round(float(data.get("years_experience", 0)), 1)
 

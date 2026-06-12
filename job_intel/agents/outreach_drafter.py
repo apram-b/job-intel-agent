@@ -6,8 +6,8 @@ import logging
 from typing import List
 
 from langchain_anthropic import ChatAnthropic
-from langchain_core.messages import HumanMessage
 
+from job_intel.core.llm import get_llm, invoke_text
 from job_intel.core.state import AgentState, OutreachDraft, RankedJobListing, ResumeData
 
 _log = logging.getLogger(__name__)
@@ -50,8 +50,7 @@ TONE & FORMAT:
 Output only the message text, no extra commentary."""
 
     try:
-        msg = llm.invoke([HumanMessage(content=prompt)])
-        return (msg.content if isinstance(msg.content, str) else "").strip()
+        return invoke_text(llm, prompt).strip()
     except Exception as exc:
         _log.warning("Outreach draft failed for %s @ %s: %s", listing["title"], listing["company"], exc)
         return ""
@@ -61,8 +60,8 @@ async def _draft_all(
     listings: List[RankedJobListing],
     resume: ResumeData,
 ) -> List[OutreachDraft]:
-    # Use Sonnet for higher-quality writing
-    llm = ChatAnthropic(model="claude-sonnet-4-5", temperature=0.4)
+    # Use the writer model (Sonnet) for higher-quality prose
+    llm = get_llm(role="writer", temperature=0.4)
 
     async def _draft_one(listing: RankedJobListing) -> OutreachDraft:
         message = await asyncio.to_thread(_draft_message, listing, resume, llm)

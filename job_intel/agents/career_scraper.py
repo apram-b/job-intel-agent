@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import json
 import logging
 import re
 from datetime import datetime, timezone
@@ -11,11 +10,10 @@ from typing import List, Tuple
 from urllib.parse import urljoin
 
 import httpx
-from langchain_anthropic import ChatAnthropic
-from langchain_core.messages import HumanMessage
 from rich.console import Console
 from rich.progress import BarColumn, Progress, SpinnerColumn, TaskProgressColumn, TextColumn
 
+from job_intel.core.llm import extract_json_array, get_llm, invoke_text
 from job_intel.core.state import AgentState, Company, JobListing
 from job_intel.db.store import save_job_listings
 
@@ -33,7 +31,6 @@ _USER_AGENT = (
 )
 
 _HREF_RE = re.compile(r'href=["\']([^"\'#][^"\']*)["\']', re.IGNORECASE)
-_JSON_ARRAY_RE = re.compile(r"\[.*\]", re.DOTALL)
 
 
 def _make_id(company: str, title: str, location: str) -> str:
@@ -177,7 +174,7 @@ def _extract_jobs(
     if not page_text and not page_links:
         return []
 
-    llm = ChatAnthropic(model="claude-haiku-4-5-20251001", temperature=0)
+    llm = get_llm()
 
     links_section = (
         f"\nEXTRACTED JOB-RELATED LINKS FROM PAGE:\n{page_links}"
@@ -212,12 +209,7 @@ PAGE TEXT:
 {page_text}"""
 
     try:
-        msg = llm.invoke([HumanMessage(content=prompt)])
-        raw = msg.content if isinstance(msg.content, str) else ""
-        match = _JSON_ARRAY_RE.search(raw)
-        if not match:
-            return []
-        items = json.loads(match.group())
+        items = extract_json_array(invoke_text(llm, prompt)) or []
     except Exception as exc:
         _log.debug("LLM extraction failed for %s: %s", company, exc)
         return []
@@ -294,7 +286,6 @@ async def _scrape_all(
     inferred_field: str,
     skills: List[str],
     location: str,
-    run_id: str,
 ) -> Tuple[List[JobListing], List[str]]:
     from playwright.async_api import async_playwright
 
@@ -353,7 +344,7 @@ def scrape_careers_node(state: AgentState) -> dict:
         return {"job_listings": [], "errors": ["career_scraper: no companies in state"]}
 
     listings, errors = asyncio.run(
-        _scrape_all(companies, inferred_field, skills, location, run_id)
+        _scrape_all(companies, inferred_field, skills, location)
     )
 
     if listings:
