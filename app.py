@@ -18,7 +18,23 @@ from job_intel.db.store import clean_stale_listings
 
 load_dotenv()
 
-st.set_page_config(page_title="Job Intel Agent", page_icon="●", layout="wide")
+st.set_page_config(page_title="Job Intel Agent", page_icon="●", layout="centered")
+
+# JetBrains Mono everywhere. Material icon spans keep their own font-family
+# (their class rules are more specific), so icons are unaffected.
+st.markdown(
+    """<style>
+    @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&display=swap');
+    html, body, p, h1, h2, h3, h4, h5, h6, li, span, label,
+    button, input, textarea, code, pre,
+    div[data-testid="stMarkdownContainer"],
+    div[data-testid="stMetricValue"],
+    div[data-testid="stMetricLabel"] {
+        font-family: 'JetBrains Mono', monospace;
+    }
+    </style>""",
+    unsafe_allow_html=True,
+)
 
 # Pipeline nodes in execution order, with UI labels
 _STAGES = [
@@ -161,8 +177,7 @@ def main() -> None:
         "career pages, rank the best-fit roles, and draft your outreach."
     )
 
-    with st.sidebar:
-        st.header("Inputs")
+    with st.container(border=True):
         uploaded = st.file_uploader("Resume (PDF)", type=["pdf"])
         location = st.text_input("Target location", placeholder='e.g. "Bangalore"')
         run = st.button("Find Jobs", type="primary", use_container_width=True,
@@ -181,7 +196,7 @@ def main() -> None:
     if "result" in st.session_state:
         _render_results(st.session_state["result"])
     elif not run:
-        st.markdown("*Upload a resume PDF and enter a location in the sidebar to get started.*")
+        st.markdown("*Upload a resume PDF and enter a location above to get started.*")
 
 
 if __name__ == "__main__":
