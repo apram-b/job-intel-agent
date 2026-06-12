@@ -46,6 +46,17 @@ _STAGES = [
 ]
 
 
+# Total pipeline runs allowed for tunnel visitors while this server is up.
+# Localhost (the operator) is exempt. Resets on server restart.
+_MAX_PUBLIC_RUNS = 10
+
+
+@st.cache_resource
+def _public_run_counter() -> dict:
+    """Shared across all sessions for the lifetime of the server process."""
+    return {"count": 0}
+
+
 def _is_local_viewer() -> bool:
     """True when the browser is hitting localhost directly (the operator).
 
@@ -197,6 +208,17 @@ def main() -> None:
                         disabled=not (uploaded and location.strip()))
 
     if run and uploaded and location.strip():
+        # Enforce the public run budget (operator on localhost is exempt)
+        if not _is_local_viewer():
+            counter = _public_run_counter()
+            if counter["count"] >= _MAX_PUBLIC_RUNS:
+                st.markdown(
+                    "*The demo has reached its run limit for now — "
+                    "please try again later.*"
+                )
+                st.stop()
+            counter["count"] += 1
+
         with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
             tmp.write(uploaded.getvalue())
             tmp_path = tmp.name
