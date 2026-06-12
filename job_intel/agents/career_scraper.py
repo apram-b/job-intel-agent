@@ -68,12 +68,21 @@ def _extract_links(html: str, base_url: str) -> str:
 
 # ── httpx plain-HTTP fallback ──────────────────────────────────────────────────
 
-def _httpx_fallback(url: str) -> str:
-    """Try a plain HTTP GET for sites that block headless browsers (e.g. 403)."""
+def _httpx_fallback(url: str) -> Tuple[str, str]:
+    """Try a plain HTTP GET for sites that block headless browsers.
+
+    Returns (page_text, status_note). On success status_note is "" and
+    page_text is populated; on failure page_text is "" and status_note
+    explains what happened (for error reporting).
+    """
     try:
         r = httpx.get(
             url,
-            headers={"User-Agent": _USER_AGENT},
+            headers={
+                "User-Agent": _USER_AGENT,
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "en-US,en;q=0.9",
+            },
             timeout=15,
             follow_redirects=True,
         )
@@ -81,10 +90,15 @@ def _httpx_fallback(url: str) -> str:
             # Strip HTML tags to get readable text
             text = re.sub(r"<[^>]+>", " ", r.text)
             text = re.sub(r"\s+", " ", text).strip()
-            return text[:_MAX_PAGE_CHARS]
+            return text[:_MAX_PAGE_CHARS], ""
+        return "", f"httpx fallback: HTTP {r.status_code}"
     except Exception as exc:
-        _log.debug("httpx fallback failed for %s: %s", url, exc)
-    return ""
+        return "", f"httpx fallback: {str(exc)[:80]}"
+
+
+# Playwright navigation errors where a plain-HTTP retry is worthwhile.
+# DNS failures are excluded — httpx would fail identically.
+_FALLBACK_NAV_ERRORS = ("ERR_HTTP2_PROTOCOL_ERROR", "ERR_CONNECTION_RESET", "ERR_SSL")
 
 
 # ── Playwright scraping ────────────────────────────────────────────────────────
@@ -107,10 +121,11 @@ async def _fetch_page(
             # Handle hard blocks — try httpx fallback on 403
             if resp and resp.status in (401, 403, 404):
                 if resp.status == 403:
-                    fallback_text = await asyncio.to_thread(_httpx_fallback, url)
+                    fallback_text, note = await asyncio.to_thread(_httpx_fallback, url)
                     if fallback_text:
                         _log.debug("httpx fallback succeeded for %s", url)
                         return fallback_text, "", None
+                    return "", "", f"HTTP 403 ({note})"
                 return "", "", f"HTTP {resp.status}"
 
             # Wait for JS-rendered content to settle
@@ -134,7 +149,15 @@ async def _fetch_page(
         except asyncio.TimeoutError:
             return "", "", "timeout"
         except Exception as exc:
-            return "", "", str(exc)[:120]
+            err = str(exc)
+            # Chromium-specific network failures often succeed over plain HTTP/1.1
+            if any(code in err for code in _FALLBACK_NAV_ERRORS):
+                fallback_text, note = await asyncio.to_thread(_httpx_fallback, url)
+                if fallback_text:
+                    _log.debug("httpx fallback succeeded for %s after nav error", url)
+                    return fallback_text, "", None
+                return "", "", f"{err[:80]} ({note})"
+            return "", "", err[:120]
         finally:
             await ctx.close()
 
@@ -147,6 +170,7 @@ def _extract_jobs(
     page_text: str,
     page_links: str,
     inferred_field: str,
+    skills: List[str],
     location: str,
 ) -> List[JobListing]:
     """Send page content to Claude Haiku; return filtered, typed JobListings."""
@@ -160,17 +184,19 @@ def _extract_jobs(
         if page_links
         else "\nEXTRACTED JOB-RELATED LINKS: (none found)"
     )
+    skills_str = ", ".join(skills[:8]) if skills else inferred_field
 
     prompt = f"""You are reviewing {company}'s careers page: {career_url}
 
 The candidate is a {inferred_field} professional seeking roles in {location} or Remote.
+Their key skills: {skills_str}
 
-Extract job listings relevant to: MLOps, ML Engineering, Data Engineering, AI/ML Platform,
-LLMOps, Data Science, or closely related technical roles.
+Extract ANY job listing plausibly related to the candidate's field or skills — including
+adjacent titles (e.g. platform, infrastructure, backend-with-ML, analytics roles).
+When in doubt, INCLUDE the listing — a later scoring stage filters precisely.
 
-Include a listing ONLY if BOTH conditions are met:
-1. Role is relevant to the candidate's field (see above)
-2. Location mentions "{location}", "India", "Remote", "Anywhere", "Hybrid", or is unspecified
+Include a listing ONLY if:
+- Location mentions "{location}", "India", "Remote", "Anywhere", "Hybrid", or is unspecified
 
 For each matching listing output a JSON object with these exact keys:
   "title"       : job title as written on the page (string)
@@ -229,6 +255,7 @@ async def _process_company(
     scrape_sem: asyncio.Semaphore,
     llm_sem: asyncio.Semaphore,
     inferred_field: str,
+    skills: List[str],
     location: str,
     progress: Progress,
     overall_task,
@@ -246,7 +273,7 @@ async def _process_company(
 
     async with llm_sem:
         listings = await asyncio.to_thread(
-            _extract_jobs, name, url, page_text, page_links, inferred_field, location
+            _extract_jobs, name, url, page_text, page_links, inferred_field, skills, location
         )
 
     if listings:
@@ -265,6 +292,7 @@ async def _process_company(
 async def _scrape_all(
     companies: List[Company],
     inferred_field: str,
+    skills: List[str],
     location: str,
     run_id: str,
 ) -> Tuple[List[JobListing], List[str]]:
@@ -290,7 +318,7 @@ async def _scrape_all(
             tasks = [
                 _process_company(
                     c, browser, scrape_sem, llm_sem,
-                    inferred_field, location, progress, overall_task
+                    inferred_field, skills, location, progress, overall_task
                 )
                 for c in companies
             ]
@@ -317,6 +345,7 @@ def scrape_careers_node(state: AgentState) -> dict:
     companies: List[Company] = state.get("companies", [])
     resume_data = state.get("resume_data", {})
     inferred_field = resume_data.get("inferred_field", "Machine Learning")
+    skills = resume_data.get("skills", [])
     location = state.get("location", "India")
     run_id = state.get("run_id", "")
 
@@ -324,7 +353,7 @@ def scrape_careers_node(state: AgentState) -> dict:
         return {"job_listings": [], "errors": ["career_scraper: no companies in state"]}
 
     listings, errors = asyncio.run(
-        _scrape_all(companies, inferred_field, location, run_id)
+        _scrape_all(companies, inferred_field, skills, location, run_id)
     )
 
     if listings:

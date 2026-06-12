@@ -1,6 +1,6 @@
 # Job Intel Agent
 
-A multi-agent job intelligence pipeline built with [LangGraph](https://github.com/langchain-ai/langgraph) and Claude. Given a resume PDF and a target location, it automatically identifies relevant companies, scrapes their career pages, scores and ranks matching job listings, and drafts personalised cold outreach messages.
+A multi-agent job intelligence pipeline built with [LangGraph](https://github.com/langchain-ai/langgraph) and Claude. Given a resume PDF and a target location, it automatically identifies relevant companies, scrapes their career pages, scores and ranks matching job listings, and drafts personalised cold outreach messages. Comes with both a CLI and a Streamlit web UI.
 
 ## How it works
 
@@ -41,6 +41,16 @@ cp .env.example .env
 ```
 
 ## Usage
+
+### Web UI
+
+```bash
+uv run streamlit run app.py
+```
+
+Opens a browser UI at `http://localhost:8501` — upload your resume PDF, enter a target location, and watch the pipeline run stage-by-stage. Results render as ranked job cards with copyable outreach drafts.
+
+### CLI
 
 ```bash
 uv run python main.py --resume path/to/resume.pdf --location "Bangalore"
@@ -105,6 +115,7 @@ job_intel/
 └── db/
     └── store.py            # SQLite persistence (resumes, companies, job listings)
 main.py                     # CLI entry point
+app.py                      # Streamlit web UI
 .env.example                # Environment variable template
 ```
 
@@ -119,6 +130,7 @@ main.py                     # CLI entry point
 | Web search | DDGS (DuckDuckGo) |
 | Persistence | SQLite via `sqlite-utils` |
 | Terminal UI | Rich |
+| Web UI | Streamlit |
 
 ## License
 
