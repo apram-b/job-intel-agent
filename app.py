@@ -46,6 +46,19 @@ _STAGES = [
 ]
 
 
+def _is_local_viewer() -> bool:
+    """True when the browser is hitting localhost directly (the operator).
+
+    Visitors arriving through a tunnel/proxy carry that domain in the Host
+    header, so debug details like scraper errors stay hidden from them.
+    """
+    try:
+        host = st.context.headers.get("Host", "")
+    except Exception:
+        return True
+    return host.split(":")[0] in ("localhost", "127.0.0.1")
+
+
 def _fmt_secs(seconds: float) -> str:
     if seconds >= 60:
         return f"{int(seconds // 60)}m {int(seconds % 60)}s"
@@ -164,7 +177,7 @@ def _render_results(result: dict) -> None:
             st.code(d["message"], language=None, wrap_lines=True)
 
     errors = result.get("errors", [])
-    if errors:
+    if errors and _is_local_viewer():
         with st.expander(f"{len(errors)} error(s)"):
             for e in errors:
                 st.text(f"- {e}")
