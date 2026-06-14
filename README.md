@@ -26,7 +26,7 @@ Resume PDF → parse_resume → find_companies → scrape_careers → score_jobs
 
 ```bash
 # Clone the repo
-git clone https://github.com/your-username/job-intel-agent.git
+git clone https://github.com/apram-b/job-intel-agent.git
 cd job-intel-agent
 
 # Install dependencies
