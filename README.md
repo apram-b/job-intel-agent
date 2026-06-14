@@ -1,20 +1,38 @@
 # Job Intel Agent
 
-A multi-agent job intelligence pipeline built with [LangGraph](https://github.com/langchain-ai/langgraph) and Claude. Given a resume PDF and a target location, it automatically identifies relevant companies, scrapes their career pages, scores and ranks matching job listings, and drafts personalised cold outreach messages. Comes with both a CLI and a Streamlit web UI.
+A multi-agent job intelligence pipeline built with [LangGraph](https://github.com/langchain-ai/langgraph) and Claude. Given a resume PDF and a target location, it identifies relevant companies, scrapes their career pages, scores each listing against your profile, and drafts personalised cold-outreach messages for the best matches.
+
+Runs from the command line or as a Streamlit web app.
 
 ## How it works
 
-The pipeline runs five agents in sequence:
+The pipeline runs five agents in sequence, orchestrated as a LangGraph state machine:
 
 ```
-Resume PDF → parse_resume → find_companies → scrape_careers → score_jobs → draft_outreach
+Resume PDF
+   │
+   ▼
+parse_resume ──► find_companies ──► scrape_careers ──► score_jobs ──► draft_outreach
+   │                  │                   │                 │               │
+ profile          target list        job listings     ranked top 5     outreach drafts
 ```
 
 1. **`parse_resume`** — Extracts structured data from your resume PDF: name, current role, years of experience, skills, tech stack, inferred field, and seniority level.
-2. **`find_companies`** — Uses the resume profile to search for companies in the target location that are actively hiring for your background. Prioritises local/remote-friendly employers and filters out companies known not to hire in the target region.
-3. **`scrape_careers`** — Visits each company's careers page in parallel with Playwright, extracts job listings (with real listing URLs, locations, and descriptions), and persists them to SQLite. Falls back to a plain HTTP request for sites that block headless browsers.
-4. **`score_jobs`** — Scores every listing against your profile on four dimensions (title match, skill overlap, location fit, seniority fit) and returns a ranked shortlist of the top 5.
-5. **`draft_outreach`** — Writes a tailored ~150-word cold outreach message for each of the top 3 listings using Claude Sonnet.
+2. **`find_companies`** — Uses the resume profile to search (DuckDuckGo) for companies in the target location likely to be hiring for your background.
+3. **`scrape_careers`** — Visits each company's careers page with Playwright, extracts job listings, and persists them to a local SQLite database.
+4. **`score_jobs`** — Asks Claude to score every listing on four dimensions — **title match, skill overlap, location fit, and seniority fit** (0–3 each, 0–12 total) — then returns a ranked **top-5** shortlist with a one-line rationale per listing. Scoring runs concurrently across listings.
+5. **`draft_outreach`** — Generates a concise (~150-word) personalised cold-outreach message for each of the **top 3** ranked listings, written to directly reference the role and the candidate's matching skills.
+
+## Model strategy
+
+The pipeline uses two Claude models, chosen per task and configurable via environment variables (so a model upgrade never touches agent code):
+
+| Role | Default model | Used for |
+| ---- | ------------- | -------- |
+| `fast` | Claude Haiku | Resume extraction, company search, scoring |
+| `writer` | Claude Sonnet | Outreach prose generation |
+
+Override with `JOB_INTEL_FAST_MODEL` and `JOB_INTEL_WRITER_MODEL` in your `.env`.
 
 ## Requirements
 
@@ -32,105 +50,96 @@ cd job-intel-agent
 # Install dependencies
 uv sync
 
-# Install Playwright browsers (needed for career page scraping)
+# Install Playwright browsers (needed for career-page scraping)
 uv run playwright install chromium
 
-# Copy the env template and add your API key
-cp .env.example .env
-# then edit .env and set ANTHROPIC_API_KEY=your_key_here
+# Set your API key
+echo "ANTHROPIC_API_KEY=your_key_here" > .env
 ```
 
 ## Usage
-
-### Web UI
-
-```bash
-uv run streamlit run app.py
-```
-
-Opens a browser UI at `http://localhost:8501` — upload your resume PDF, enter a target location, and watch the pipeline run stage-by-stage. Results render as ranked job cards with copyable outreach drafts.
 
 ### CLI
 
 ```bash
 uv run python main.py --resume path/to/resume.pdf --location "Bangalore"
-```
 
-Optionally save the full results to a JSON file:
-
-```bash
+# Optionally save results to JSON
 uv run python main.py --resume resume.pdf --location "Bangalore" --output results.json
 ```
 
-### Example output
+Example output:
 
 ```
-────────────── Job Intel | resume='resume.pdf' location='Bangalore' ──────────────
+=== Job Intel  |  resume='resume.pdf'  location='Bangalore' ===
 
-──────────────────────────── Parsed Resume ────────────────────────────
+=== Parsed Resume ===
   Name            : Jane Doe
   Current role    : MLOps Engineer
   Experience      : 4.0 year(s)
   Inferred field  : MLOps Engineering
   Seniority       : mid
-  Skills          : Python, Docker, Kubernetes, MLflow, ...
-  Stack           : AWS, Airflow, Terraform, ...
+  Skills          : Python, Docker, Kubernetes, ...
+  Stack           : AWS, MLflow, Airflow, ...
 
-──────────────────────── 10 Companies Targeted ────────────────────────
-  • Flipkart  →  https://flipkart.com/careers
-  • Swiggy    →  https://careers.swiggy.com
+=== 8 Companies Targeted ===
+  • Company A
+  • Company B
   ...
 
-──────────────────────── Top Ranked Job Listing(s) ────────────────────
+=== Top 5 Ranked Listings ===
+  [11/12]  Company A  —  Senior MLOps Engineer  (Bangalore)
+           Strong title and stack overlap; one level up on seniority.
+  [9/12]   Company B  —  ML Platform Engineer   (Remote)
+  ...
 
-  [Flipkart]  MLOps Engineer  Score: 10/12
-  Location    : Bangalore, India
-  URL         : https://flipkart.com/careers/job/12345
-  Description : Build and maintain ML infrastructure at scale ...
-  Why         : Strong title and skill match; exact location; seniority aligns.
-
-──────────────────────────── Outreach Draft(s) ────────────────────────
-
-  [Flipkart]  MLOps Engineer
-
-    I've spent the last 4 years building ML infrastructure ...
-    ...
+=== Outreach Drafts (top 3) ===
+  → Company A — Senior MLOps Engineer
+    "I noticed your team is scaling its ML platform..."
+  ...
 ```
 
 Results are also saved to `job_intel.db` (SQLite) for querying later.
+
+### Streamlit app
+
+```bash
+uv run streamlit run app.py
+```
+
+Upload a resume, enter a location, and watch the five stages run live. (The hosted build includes a per-session run cap for public visitors.)
 
 ## Project structure
 
 ```
 job_intel/
 ├── agents/
-│   ├── resume_parser.py    # Parses resume PDF with Claude
-│   ├── company_finder.py   # Finds target companies via web search
-│   ├── career_scraper.py   # Scrapes job listings from career pages (Playwright + httpx fallback)
-│   ├── job_scorer.py       # Scores and ranks listings against the candidate profile
-│   └── outreach_drafter.py # Drafts personalised cold outreach messages
+│   ├── resume_parser.py     # Parses resume PDF with Claude
+│   ├── company_finder.py    # Finds target companies via web search
+│   ├── career_scraper.py    # Scrapes job listings from career pages
+│   ├── job_scorer.py        # Scores & ranks listings (4 dimensions)
+│   └── outreach_drafter.py  # Drafts cold-outreach messages
 ├── core/
-│   ├── graph.py            # LangGraph pipeline definition
-│   └── state.py            # Shared AgentState TypedDicts
+│   ├── graph.py             # LangGraph pipeline definition
+│   ├── state.py             # Shared AgentState TypedDicts
+│   └── llm.py               # Model selection & JSON extraction utils
 └── db/
-    └── store.py            # SQLite persistence (resumes, companies, job listings)
-main.py                     # CLI entry point
-app.py                      # Streamlit web UI
-.env.example                # Environment variable template
+    └── store.py             # SQLite persistence layer
+app.py                       # Streamlit web app
+main.py                      # CLI entry point
 ```
 
 ## Tech stack
 
-| Layer | Library |
-|---|---|
-| Agent orchestration | LangGraph |
-| LLM | Claude Haiku / Sonnet (via `langchain-anthropic`) |
-| PDF parsing | pdfplumber |
-| Web scraping | Playwright + httpx |
-| Web search | DDGS (DuckDuckGo) |
-| Persistence | SQLite via `sqlite-utils` |
-| Terminal UI | Rich |
-| Web UI | Streamlit |
+| Layer               | Library                            |
+| ------------------- | ---------------------------------- |
+| Agent orchestration | LangGraph                          |
+| LLM                 | Claude — Haiku + Sonnet (via `langchain-anthropic`) |
+| Web UI              | Streamlit                          |
+| PDF parsing         | pdfplumber                         |
+| Web scraping        | Playwright                         |
+| Web search          | DDGS (DuckDuckGo)                  |
+| Persistence         | SQLite via `sqlite-utils`          |
 
 ## License
 
