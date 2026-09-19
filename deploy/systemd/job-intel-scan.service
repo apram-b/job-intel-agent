@@ -1,0 +1,13 @@
+[Unit]
+Description=Job Intel daily collection and evaluation
+After=docker.service network-online.target
+Requires=docker.service
+OnFailure=job-intel-alert.service
+StartLimitIntervalSec=3600
+StartLimitBurst=2
+[Service]
+Type=oneshot
+ExecStart=/opt/job-intel/current/deploy/daily.sh
+TimeoutStartSec=45min
+Restart=on-failure
+RestartSec=5min

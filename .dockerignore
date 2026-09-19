@@ -1,0 +1,10 @@
+.git
+.venv
+.runtime
+.env*
+data
+work
+*.pdf
+*.db*
+.streamlit/secrets.toml
+__pycache__

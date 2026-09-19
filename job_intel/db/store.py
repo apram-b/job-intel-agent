@@ -5,6 +5,7 @@ untouched; those remain available as an archive when opening an old database.
 """
 
 from __future__ import annotations
+from job_intel.db.sqlite import enable_wal
 import json
 import os
 import sqlite3
@@ -26,7 +27,7 @@ def connection():
     db = sqlite3.connect(path, timeout=30)
     db.row_factory = sqlite3.Row
     try:
-        db.execute("PRAGMA journal_mode=WAL")
+        enable_wal(db)
         db.execute("PRAGMA foreign_keys=ON")
         db.executescript("""
         CREATE TABLE IF NOT EXISTS profiles (id TEXT PRIMARY KEY, payload TEXT NOT NULL, updated_at TEXT NOT NULL);

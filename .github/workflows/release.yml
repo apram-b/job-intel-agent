@@ -1,0 +1,50 @@
+name: Release
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+  packages: write
+concurrency:
+  group: job-intel-release
+  cancel-in-progress: false
+jobs:
+  checks:
+    uses: ./.github/workflows/checks.yml
+  image:
+    needs: checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ghcr.io/apram-b/job-intel-agent:${{ github.sha }}
+  deploy:
+    if: vars.JOB_INTEL_DEPLOY_ENABLED == 'true'
+    needs: image
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure pinned SSH identity
+        env:
+          SSH_KEY: ${{ secrets.JOB_INTEL_SSH_KEY }}
+          KNOWN_HOSTS: ${{ secrets.JOB_INTEL_KNOWN_HOSTS }}
+        run: |
+          install -d -m 700 ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/id_ed25519
+          printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/id_ed25519 ~/.ssh/known_hosts
+      - name: Deliver tested release
+        env:
+          WORKER: ${{ secrets.JOB_INTEL_SSH_HOST }}
+          RELEASE_SHA: ${{ github.sha }}
+        run: |
+          git archive --format=tar "$RELEASE_SHA" | ssh "ubuntu@$WORKER" "sudo mkdir -p /opt/job-intel/releases/$RELEASE_SHA && sudo tar -x -C /opt/job-intel/releases/$RELEASE_SHA"
+          ssh "ubuntu@$WORKER" "sudo /opt/job-intel/releases/$RELEASE_SHA/deploy/deploy-release.sh $RELEASE_SHA"

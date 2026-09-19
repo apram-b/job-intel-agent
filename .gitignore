@@ -20,3 +20,10 @@ dist/
 *.egg-info/
 
 .runtime/
+work/
+*.age
+*.key
+*.pem
+deploy/worker.env
+config/search_profile.yaml
+config/candidate.json

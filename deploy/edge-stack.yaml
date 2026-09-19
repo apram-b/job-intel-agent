@@ -1,0 +1,104 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Sanitized Job Intel snapshot, private S3 origin, CloudFront FREE flat-rate subscription. Deploy in us-east-1.
+Parameters:
+  PublishAfterPilot:
+    Type: String
+    AllowedValues: ['true', 'false']
+    Default: 'false'
+Resources:
+  DemoBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        IgnorePublicAcls: true
+        BlockPublicPolicy: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault: {SSEAlgorithm: AES256}
+  OriginAccess:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub '${AWS::StackName}-s3'
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+  WebAcl:
+    Type: AWS::WAFv2::WebACL
+    Properties:
+      Scope: CLOUDFRONT
+      DefaultAction: {Allow: {}}
+      VisibilityConfig:
+        CloudWatchMetricsEnabled: false
+        SampledRequestsEnabled: false
+        MetricName: job-intel-demo
+      Rules:
+        - Name: RateLimit
+          Priority: 0
+          Statement:
+            RateBasedStatement: {Limit: 500, AggregateKeyType: IP}
+          Action: {Block: {}}
+          VisibilityConfig:
+            CloudWatchMetricsEnabled: false
+            SampledRequestsEnabled: false
+            MetricName: job-intel-rate
+  Distribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: !Ref PublishAfterPilot
+        Comment: Public sanitized Job Intel demo
+        DefaultRootObject: index.html
+        WebACLId: !GetAtt WebAcl.Arn
+        HttpVersion: http2
+        Origins:
+          - Id: demo
+            DomainName: !GetAtt DemoBucket.RegionalDomainName
+            OriginAccessControlId: !Ref OriginAccess
+            S3OriginConfig: {OriginAccessIdentity: ''}
+        DefaultCacheBehavior:
+          TargetOriginId: demo
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods: [GET, HEAD]
+          CachedMethods: [GET, HEAD]
+          Compress: true
+          MinTTL: 0
+          DefaultTTL: 300
+          MaxTTL: 3600
+          ForwardedValues:
+            QueryString: false
+            Cookies: {Forward: none}
+        ViewerCertificate: {CloudFrontDefaultCertificate: true}
+  FreeSubscription:
+    Type: AWS::PricingPlanManager::Subscription
+    Properties:
+      PlanFamily: CloudFront
+      PlanTier: FREE
+      UsageLevel: DEFAULT
+      ResourceArns:
+        - !Sub 'arn:aws:cloudfront::${AWS::AccountId}:distribution/${Distribution}'
+        - !GetAtt WebAcl.Arn
+  BucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref DemoBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: {Service: cloudfront.amazonaws.com}
+            Action: s3:GetObject
+            Resource: !Sub '${DemoBucket.Arn}/*'
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub 'arn:aws:cloudfront::${AWS::AccountId}:distribution/${Distribution}'
+Outputs:
+  DemoBucket: {Value: !Ref DemoBucket}
+  DemoBucketArn: {Value: !GetAtt DemoBucket.Arn}
+  DemoUrl: {Value: !Sub 'https://${Distribution.DomainName}'}
+  DistributionId: {Value: !Ref Distribution}
+  SubscriptionId: {Value: !Ref FreeSubscription}

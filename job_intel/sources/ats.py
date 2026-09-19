@@ -41,7 +41,8 @@ def listing(company, source, source_id, title, location, url, description, **ext
     }
 
 
-def fetch(company):
+def fetch(company, *, get=None):
+    get = get or web.get
     spec = board(company["career_url"])
     if spec is None:
         return None
@@ -49,7 +50,7 @@ def fetch(company):
     source = f"{provider}:{base}:{token}"
     token_url = quote(token, safe="")
     if provider == "greenhouse":
-        payload = web.get(f"{base}/v1/boards/{token_url}/jobs?content=true").json()
+        payload = get(f"{base}/v1/boards/{token_url}/jobs?content=true").json()
         if not isinstance(payload, dict) or not isinstance(payload.get("jobs"), list):
             raise ValueError("Invalid Greenhouse response")
         items = payload["jobs"]
@@ -65,13 +66,14 @@ def fetch(company):
                 j["absolute_url"],
                 web.text(j.get("content", "")),
                 updated_at=j.get("updated_at"),
+                apply_url=j["absolute_url"],
                 description_complete=True,
             )
             for j in items
         ]
     results = []
     for page in range(20):
-        items = web.get(f"{base}/v0/postings/{token_url}?mode=json&skip={page * 100}&limit=100").json()
+        items = get(f"{base}/v0/postings/{token_url}?mode=json&skip={page * 100}&limit=100").json()
         if not isinstance(items, list):
             raise ValueError("Invalid Lever response")
         for j in items:
@@ -97,6 +99,7 @@ def fetch(company):
                     description,
                     description_complete=True,
                     posted_at=j.get("createdAt"),
+                    apply_url=j.get("applyUrl") or j["hostedUrl"],
                     salary=j.get("salaryRange"),
                 )
             )

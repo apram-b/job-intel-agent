@@ -63,6 +63,13 @@ def main():
     render_theme()
     st.title("Job Intel")
     st.caption("Find relevant roles. Keep the evidence. Track your next move.")
+    if not public:
+        workspace = st.sidebar.radio("Workspace", ["Daily queue", "Legacy search"], index=0)
+        if workspace == "Daily queue":
+            from job_intel.v2.ui import render
+
+            render()
+            return
     claims, user_id = {}, "personal"
     if public:
         issuer = os.getenv("JOB_INTEL_OIDC_ISSUER", "")

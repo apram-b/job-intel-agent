@@ -1,4 +1,38 @@
-# Job Intel Agent
+# Job Intel Agent v2
+
+Job Intel Agent discovers, validates, ranks, and tracks opportunities using candidate fit, evidence of active hiring, and career value. It explains each recommendation and keeps the human in control of applications and outreach.
+
+## Daily queue
+
+V2 adds a persistent watchlist, safe job lifecycle reconciliation, versioned candidate/preferences, three independent scores, transactional monthly model budgets, a local queue dashboard, and a sanitized static portfolio demo. Greenhouse and Lever run independently of résumé parsing or UI visits.
+
+```sh
+uv sync --locked
+uv run python main.py --v2 migrate
+uv run python main.py --v2 import-legacy data/job_intel.db
+uv run streamlit run app.py
+```
+
+Back up your database before migration. The original tables stay intact. Existing generic web sources start disabled and unverified; add verified ATS boards or review new discovery suggestions in Companies. The default local workspace is now Daily queue; Legacy search preserves the earlier flow.
+
+V2 supports SQLite locally and PostgreSQL on the worker. Configure a reviewed candidate and editable YAML preferences, then scan and evaluate:
+
+```sh
+uv run python main.py --v2 configure --candidate config/candidate.json --preferences config/search_profile.example.yaml
+uv run python main.py --v2 watchlist --import-sources config/my-sources.json
+uv run python main.py --v2 scan
+uv run python main.py --v2 evaluate
+uv run python main.py --v2 export-demo --seed-profile
+```
+
+Paid v2 scoring requires a private provider key and explicitly reviewed prices for the exact model. Missing credentials or exhausted budget leave jobs pending. The seeded public demo works without a key and clearly labels fictional openings.
+
+See [v2 operator runbook](docs/v2-runbook.md), [architecture](docs/architecture.md) and [implementation validation](docs/v2-validation.md). AWS templates target a US$20 monthly envelope; deployment, the seven-day pilot and human relevance acceptance are **not implied by passing local tests**.
+
+---
+
+## Preserved legacy workflow
+
 
 A local job-search assistant for senior Data Engineering, MLOps and ML Platform roles in India. It discovers employers, reads job postings, checks location eligibility, ranks evidence-backed matches and keeps application history between searches.
 

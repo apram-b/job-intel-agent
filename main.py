@@ -13,6 +13,12 @@ from job_intel.db import store
 
 
 def main():
+    import sys
+
+    if "--v2" in sys.argv[1:]:
+        from job_intel.v2.cli import main as v2_main
+
+        return v2_main([arg for arg in sys.argv[1:] if arg != "--v2"])
     load_dotenv()
     parser = argparse.ArgumentParser(description="Job Intel — verified matches and durable job history")
     parser.add_argument("--resume", help="Text-based PDF, at most 5 MB / 10 pages")

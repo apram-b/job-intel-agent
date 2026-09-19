@@ -1,0 +1,8 @@
+[Unit]
+Description=Encrypted off-host database backup
+After=docker.service network-online.target
+OnFailure=job-intel-alert.service
+[Service]
+Type=oneshot
+ExecStart=/opt/job-intel/current/deploy/backup.sh
+TimeoutStartSec=15min

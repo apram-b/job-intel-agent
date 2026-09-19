@@ -1,0 +1,8 @@
+[Unit]
+Description=Check database and per-company scan freshness
+After=docker.service network-online.target
+OnFailure=job-intel-alert.service
+[Service]
+Type=oneshot
+ExecStart=/opt/job-intel/current/deploy/run.sh health
+TimeoutStartSec=5min

@@ -1,10 +1,23 @@
 name: Checks
-on: [push, pull_request]
+on: [push, pull_request, workflow_call]
 permissions:
   contents: read
 jobs:
   test:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: job_intel_test
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: test-only-password
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s --health-timeout 5s --health-retries 10
+    env:
+      TEST_POSTGRES_URL: postgresql+psycopg://postgres:test-only-password@localhost:5432/job_intel_test
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
@@ -12,3 +25,10 @@ jobs:
       - run: uv run pytest -q
       - run: uv run ruff check .
       - run: uv run ruff format --check .
+      - run: |
+          for file in deploy/*.sh; do bash -n "$file" || exit; done
+      - run: uvx cfn-lint==1.57.0 deploy/worker-stack.yaml deploy/edge-stack.yaml
+      - run: docker build -t job-intel:test .
+      - name: Check image migration and demo
+        run: |
+          docker run --rm --entrypoint /bin/sh job-intel:test -c 'python -m job_intel.v2.cli migrate && python -m job_intel.v2.cli export-demo --seed-profile'
