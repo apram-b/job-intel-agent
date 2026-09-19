@@ -1,9 +1,10 @@
-[theme]
-base = "dark"
-primaryColor = "#E8E8E8"
-backgroundColor = "#0D0D0D"
-secondaryBackgroundColor = "#171717"
-textColor = "#D6D6D6"
-
+[server]
+address = "127.0.0.1"
+maxUploadSize = 5
+enableXsrfProtection = true
+enableCORS = true
 [browser]
 gatherUsageStats = false
+[theme]
+base = "dark"
+primaryColor = "#176B58"

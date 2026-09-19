@@ -1,26 +1,26 @@
 [project]
 name = "job-intel-agent"
-version = "0.1.0"
-description = "Multi-agent job intelligence pipeline"
+version = "0.2.0"
+description = "Evidence-backed job intelligence with persistent history and public trial quotas"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 dependencies = [
-    "langchain-anthropic>=0.3.0",
-    "langgraph>=0.2.0",
-    "langchain-core>=0.3.0",
-    "pdfplumber>=0.11.9",
-    "playwright>=1.49.0",
-    "sqlite-utils>=3.39",
-    "python-dotenv>=1.0.0",
-    "ddgs>=9.0.0",
-    "httpx>=0.27.0",
-    "rich>=13.0",
-    "streamlit>=1.40",
+    "openai>=1.99", "anthropic>=0.60", "langgraph>=1.0",
+    "pydantic>=2.10", "pdfplumber>=0.11.9",
+    "python-dotenv>=1.0", "ddgs>=9.0", "httpx>=0.27",
+    "beautifulsoup4>=4.12", "streamlit[auth]>=1.42", "rich>=13.0",
 ]
-
+[dependency-groups]
+dev = ["pytest>=8.0", "ruff>=0.11"]
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
-
 [tool.hatch.build.targets.wheel]
 packages = ["job_intel"]
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+[tool.ruff]
+target-version = "py312"
+line-length = 110
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]

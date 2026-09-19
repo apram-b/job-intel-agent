@@ -1,146 +1,117 @@
 # Job Intel Agent
 
-A multi-agent job intelligence pipeline built with [LangGraph](https://github.com/langchain-ai/langgraph) and Claude. Given a resume PDF and a target location, it identifies relevant companies, scrapes their career pages, scores each listing against your profile, and drafts personalised cold-outreach messages for the best matches.
+A local job-search assistant for senior Data Engineering, MLOps and ML Platform roles in India. It discovers employers, reads job postings, checks location eligibility, ranks evidence-backed matches and keeps application history between searches.
 
-Runs from the command line or as a Streamlit web app.
+This version builds on [apram-b/job-intel-agent](https://github.com/apram-b/job-intel-agent), starting at `d112785`. It adds an OpenAI/Anthropic provider boundary and an optional authenticated public trial. It never submits applications or sends outreach.
 
-## How it works
+## Start locally
 
-The pipeline runs five agents in sequence, orchestrated as a LangGraph state machine:
+Requires Python 3.12+ and [uv](https://docs.astral.sh/uv/).
 
-```
-Resume PDF
-   │
-   ▼
-parse_resume ──► find_companies ──► scrape_careers ──► score_jobs ──► draft_outreach
-   │                  │                   │                 │               │
- profile          target list        job listings     ranked top 5     outreach drafts
-```
-
-1. **`parse_resume`** — Extracts structured data from your resume PDF: name, current role, years of experience, skills, tech stack, inferred field, and seniority level.
-2. **`find_companies`** — Uses the resume profile to search (DuckDuckGo) for companies in the target location likely to be hiring for your background.
-3. **`scrape_careers`** — Visits each company's careers page with Playwright, extracts job listings, and persists them to a local SQLite database.
-4. **`score_jobs`** — Asks Claude to score every listing on four dimensions — **title match, skill overlap, location fit, and seniority fit** (0–3 each, 0–12 total) — then returns a ranked **top-5** shortlist with a one-line rationale per listing. Scoring runs concurrently across listings.
-5. **`draft_outreach`** — Generates a concise (~150-word) personalised cold-outreach message for each of the **top 3** ranked listings, written to directly reference the role and the candidate's matching skills.
-
-## Model strategy
-
-The pipeline uses two Claude models, chosen per task and configurable via environment variables (so a model upgrade never touches agent code):
-
-| Role | Default model | Used for |
-| ---- | ------------- | -------- |
-| `fast` | Claude Haiku | Resume extraction, company search, scoring |
-| `writer` | Claude Sonnet | Outreach prose generation |
-
-Override with `JOB_INTEL_FAST_MODEL` and `JOB_INTEL_WRITER_MODEL` in your `.env`.
-
-## Requirements
-
-- Python 3.11+
-- [uv](https://github.com/astral-sh/uv) (recommended) or pip
-- An Anthropic API key
-
-## Setup
-
-```bash
-# Clone the repo
-git clone https://github.com/apram-b/job-intel-agent.git
-cd job-intel-agent
-
-# Install dependencies
-uv sync
-
-# Install Playwright browsers (needed for career-page scraping)
-uv run playwright install chromium
-
-# Set your API key
-echo "ANTHROPIC_API_KEY=your_key_here" > .env
-```
-
-## Usage
-
-### CLI
-
-```bash
-uv run python main.py --resume path/to/resume.pdf --location "Bangalore"
-
-# Optionally save results to JSON
-uv run python main.py --resume resume.pdf --location "Bangalore" --output results.json
-```
-
-Example output:
-
-```
-=== Job Intel  |  resume='resume.pdf'  location='Bangalore' ===
-
-=== Parsed Resume ===
-  Name            : Jane Doe
-  Current role    : MLOps Engineer
-  Experience      : 4.0 year(s)
-  Inferred field  : MLOps Engineering
-  Seniority       : mid
-  Skills          : Python, Docker, Kubernetes, ...
-  Stack           : AWS, MLflow, Airflow, ...
-
-=== 8 Companies Targeted ===
-  • Company A
-  • Company B
-  ...
-
-=== Top 5 Ranked Listings ===
-  [11/12]  Company A  —  Senior MLOps Engineer  (Bangalore)
-           Strong title and stack overlap; one level up on seniority.
-  [9/12]   Company B  —  ML Platform Engineer   (Remote)
-  ...
-
-=== Outreach Drafts (top 3) ===
-  → Company A — Senior MLOps Engineer
-    "I noticed your team is scaling its ML platform..."
-  ...
-```
-
-Results are also saved to `job_intel.db` (SQLite) for querying later.
-
-### Streamlit app
-
-```bash
+```sh
+uv sync --locked
+cp .env.example .env
+# Set OPENAI_API_KEY or ANTHROPIC_API_KEY in .env, or enter a key in the UI.
 uv run streamlit run app.py
 ```
 
-Upload a resume, enter a location, and watch the five stages run live. (The hosted build includes a per-session run cap for public visitors.)
+Open http://127.0.0.1:8501. Local mode binds to loopback and refuses a non-loopback server configuration. A tunnel must **not** be pointed at local mode; use authenticated public mode for sharing.
 
-## Project structure
+The app asks for a text-based PDF (at most 5 MB and 10 pages). Edit your target roles, preferred/secondary cities and must-have skills. Supply verified Greenhouse or Lever board URLs for the most reliable results, or leave sources blank to discover supported employer boards. Aggregator search pages are excluded in code; automatic discovery does not spend model calls. Resume text goes to the chosen model provider only when a search starts. You can inspect the parsed profile afterwards; the CLI also accepts a manually corrected profile JSON.
 
-```
-job_intel/
-├── agents/
-│   ├── resume_parser.py     # Parses resume PDF with Claude
-│   ├── company_finder.py    # Finds target companies via web search
-│   ├── career_scraper.py    # Scrapes job listings from career pages
-│   ├── job_scorer.py        # Scores & ranks listings (4 dimensions)
-│   └── outreach_drafter.py  # Drafts cold-outreach messages
-├── core/
-│   ├── graph.py             # LangGraph pipeline definition
-│   ├── state.py             # Shared AgentState TypedDicts
-│   └── llm.py               # Model selection & JSON extraction utils
-└── db/
-    └── store.py             # SQLite persistence layer
-app.py                       # Streamlit web app
-main.py                      # CLI entry point
+Try a fictional offline example without a key:
+
+```sh
+uv run python main.py --demo --output data/demo-results.json --digest data/demo-digest.md
 ```
 
-## Tech stack
+The demo uses `data/demo.db`, never a production database. It demonstrates persistence and repeat-run deduplication; its scores are recorded examples, not model evaluations.
 
-| Layer               | Library                            |
-| ------------------- | ---------------------------------- |
-| Agent orchestration | LangGraph                          |
-| LLM                 | Claude — Haiku + Sonnet (via `langchain-anthropic`) |
-| Web UI              | Streamlit                          |
-| PDF parsing         | pdfplumber                         |
-| Web scraping        | Playwright                         |
-| Web search          | DDGS (DuckDuckGo)                  |
-| Persistence         | SQLite via `sqlite-utils`          |
+## Run from the command line
 
-## License
+```sh
+uv run python main.py --resume resume.pdf --profile config/search-profile.json --provider openai --output data/results.json --digest data/digest.md
+uv run python main.py --resume resume.pdf --location Gurgaon --provider anthropic
+uv run python main.py --resume-json data/reviewed-resume.json --sources data/my-sources.json
+uv run python main.py --history
+uv run python main.py --job-id JOB_ID --status applied --notes "Applied on company website" --follow-up 2026-10-01
+```
 
-MIT
+`config/sources.example.json` illustrates the source format; replace its placeholder before using it. A source is an employer name and an observed career URL. No board slugs or filtered URLs are invented by code. An optional read-only smoke-test source is supplied in `config/sources.smoke.json`; it is a connector test, not an employer endorsement.
+
+Defaults prioritize Gurgaon/Gurugram and Delhi NCR, India-eligible remote roles, then Bangalore/Bengaluru, Hyderabad and Pune. A bare “Remote” does not prove India eligibility and goes to review. Salary and other absent facts remain unknown. The city rules are conservative heuristics, not a work-authorization determination.
+
+Profiles, raw jobs, observations, scores, drafts and application statuses are saved in SQLite. Exported JSON contains the full run. Only qualified new/changed matches enter the Markdown digest. The CLI can be invoked by an external scheduler; no recurring job or notification delivery is installed automatically.
+
+## What changed
+
+- Automatic discovery searches Greenhouse and Lever postings and deduplicates employer boards. Search-engine results are validated even if the engine ignores its site filter.
+- Generic extraction, available only for explicitly supplied local career sources, has a six-call allowance so it cannot consume the entire scoring budget.
+- No deletion of jobs simply because a later search missed them. First/last seen dates and per-profile observations persist.
+- IDs use board identity and source posting ID, with canonical URL identity for generic pages.
+- Greenhouse reads full descriptions; Lever reads all pages up to a documented safety bound. Source errors remain distinct from empty boards.
+- Actual search preferences reach scoring. Deterministic geography checks run before model scoring.
+- Model output is validated. Every nonzero fit dimension must quote evidence from the posting. Invalid scores and unsupported claims fail validation rather than becoming a match.
+- Scores are cached by job content, reviewed candidate profile, search preferences, model and scorer version. Applied/rejected/closed roles are excluded from new shortlists.
+- Resume failures terminate dependent stages. Run outcomes are complete, partial or failed.
+- Optional outreach is limited to qualified matches and remains a draft.
+- Public mode offers three lifetime sponsored runs per verified identity, then bring-your-own-key. The allowance is not a browser counter.
+- Dependencies are locked; regression and UI tests run without credentials.
+
+## Models
+
+OpenAI is the initial default, using the pinned `gpt-5-mini-2025-08-07` baseline through the Responses API with structured output. Anthropic remains available through a forced structured tool response using `claude-haiku-4-5-20251001`. Both responses undergo Pydantic validation.
+
+Set `JOB_INTEL_PROVIDER`, `JOB_INTEL_OPENAI_MODEL`, or `JOB_INTEL_ANTHROPIC_MODEL` in `.env`. A model override must support the selected API and parameters; the OpenAI adapter currently sends `reasoning.effort=minimal`. No automatic provider fallback occurs, particularly when a visitor supplies a personal key.
+
+See [model decision](docs/model-decision.md) for the rationale and the evaluation needed before claiming one provider is better.
+
+## Structure
+
+```text
+app.py / main.py           UI and CLI
+job_intel/core/
+  models.py               Validated search/candidate/assessment schemas
+  graph.py                Conditional LangGraph workflow
+  pipeline.py             Shared runner and durable stage persistence
+  matching.py             Location and role eligibility
+  llm.py                  Provider adapters, isolated credentials, usage bounds
+  access.py / public.py   Verified identity and atomic trial admission
+job_intel/agents/          Parsing, discovery, collection, scoring, drafting
+job_intel/sources/         Bounded HTTP reads and Greenhouse/Lever adapters
+job_intel/db/store.py      SQLite history, scores and application state
+config/                   Editable preference and source examples
+ tests/                   Offline regression/integration/UI tests
+```
+
+The old `resumes`, `companies` and `job_listings` tables are left untouched if you point at an original database. They remain a legacy archive; they are not automatically imported into profile-scoped history.
+
+## Public trial
+
+Public mode is implemented but requires your OIDC credentials and persistent hosting configuration. See [public setup and abuse controls](docs/public-launch.md). Nothing has been deployed.
+
+```sh
+JOB_INTEL_MODE=public uv run streamlit run app.py --server.address 0.0.0.0
+```
+
+Do not run that command until authentication, HTTPS and persistent database storage are configured. Multiple independent replicas must not use independent SQLite files; use one persistent replica or migrate quota transactions to a shared database.
+
+## Verification
+
+```sh
+uv run pytest -q
+uv run ruff check .
+uv run ruff format --check .
+```
+
+Tests mock external model and job-board calls. They cover failed searches preserving history, profile isolation, job identity, score validation/cache behavior, India location rules, pagination, redirect validation, provider-key isolation, trial concurrency/replay, and UI startup. See [validation notes](docs/validation.md) for what was and was not verified live.
+
+## Remaining work
+
+- Evaluate top-ten relevance on 50–100 user-labeled real postings, including experience and India-remote edge cases.
+- Expand verified employer coverage; add Workday and other source-specific adapters. Generic fallback reads static HTML only and is explicitly partial. Dynamic JavaScript-only sites are unsupported in this version.
+- Add salary/notice-period/remote-policy extraction with evidence, editable resume review in the UI, and better employment-interval calculation. Resume tenure is still model-extracted and needs user review.
+- Add a durable background queue/checkpoints, scheduled delivery and actionable follow-up reminders. The current UI runs a bounded synchronous workflow.
+- Before public launch, complete real OIDC and BYOK acceptance tests, establish retention/deletion procedures, test infrastructure limits and configure provider-level budgets.
+
+License: MIT, as declared by the upstream README; see LICENSE.

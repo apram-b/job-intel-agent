@@ -1,156 +1,96 @@
-"""Entry point for the job-intel pipeline.
+"""CLI: reproducible searches, history and application tracking."""
 
-Usage:
-    python main.py --resume path/to/resume.pdf --location "Bangalore"
-    python main.py --resume resume.pdf --location "Bangalore" --output results.json
-"""
 from __future__ import annotations
-
 import argparse
 import json
-import logging
-import uuid
+import os
 from pathlib import Path
-
 from dotenv import load_dotenv
-from rich.console import Console
-from rich.rule import Rule
-
-from job_intel.core.graph import build_graph
-from job_intel.db.store import clean_stale_listings
-
-# All agent modules use logging — set to WARNING so only real problems surface.
-# Set to INFO or DEBUG here (or via LOG_LEVEL env var) for verbose output.
-logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(name)s: %(message)s")
-
-console = Console()
+from job_intel.core.models import load_profile
+from job_intel.core.llm import settings
+from job_intel.core.pipeline import run_pipeline
+from job_intel.db import store
 
 
-def main() -> None:
+def main():
     load_dotenv()
-
-    parser = argparse.ArgumentParser(description="Job Intel Agent")
-    parser.add_argument("--resume", required=True, help="Path to resume PDF")
-    parser.add_argument("--location", required=True, help='e.g. "Bangalore"')
+    parser = argparse.ArgumentParser(description="Job Intel — verified matches and durable job history")
+    parser.add_argument("--resume", help="Text-based PDF, at most 5 MB / 10 pages")
+    parser.add_argument("--resume-json", help="Reviewed Resume schema JSON; skips PDF/model parsing")
+    parser.add_argument("--profile", help="Search preferences JSON")
+    parser.add_argument("--sources", help="JSON array of name/career_url entries")
+    parser.add_argument("--location", help="Override primary city (legacy CLI compatibility)")
+    parser.add_argument("--provider", choices=["openai", "anthropic"])
+    parser.add_argument("--output", help="Save full run as JSON")
+    parser.add_argument("--digest", help="Save new/changed qualified matches as Markdown")
+    parser.add_argument("--db", help="SQLite path; default data/job_intel.db")
+    parser.add_argument("--history", action="store_true")
+    parser.add_argument("--status", choices=store.STATUSES)
+    parser.add_argument("--job-id")
+    parser.add_argument("--notes", default="")
+    parser.add_argument("--follow-up", help="YYYY-MM-DD")
     parser.add_argument(
-        "--output",
-        default=None,
-        metavar="FILE",
-        help="Optional path to save results as JSON (e.g. results.json)",
+        "--demo", action="store_true", help="Offline fictional example in a separate database"
     )
     args = parser.parse_args()
+    if args.db:
+        os.environ["JOB_INTEL_DB"] = args.db
+    profile = load_profile(args.profile)
+    if args.location:
+        profile.preferred_cities = [args.location]
+    if args.demo:
+        from job_intel.demo import run_demo
 
-    run_id = str(uuid.uuid4())
-    graph = build_graph()
-
-    console.print(Rule(f"[bold cyan]Job Intel[/bold cyan]  |  resume={args.resume!r}  location={args.location!r}"))
-    console.print()
-
-    result = graph.invoke(
-        {
-            "resume_path": args.resume,
-            "location": args.location,
-            "run_id": run_id,
-            "companies": [],
-            "job_listings": [],
-            "ranked_listings": [],
-            "outreach_drafts": [],
-            "errors": [],
-        }
+        result = run_demo()
+    elif args.history:
+        print(json.dumps(store.history(profile.profile_id), indent=2))
+        return 0
+    elif args.status:
+        if not args.job_id:
+            parser.error("--status requires --job-id")
+        store.set_status(profile.profile_id, args.job_id, args.status, args.notes, args.follow_up)
+        print("Application updated")
+        return 0
+    else:
+        if not (args.resume or args.resume_json):
+            parser.error("Provide --resume or --resume-json, or use --demo / --history")
+        result = run_pipeline(
+            profile,
+            settings(args.provider),
+            resume_path=args.resume,
+            resume_data=json.loads(Path(args.resume_json).read_text()) if args.resume_json else None,
+            companies=json.loads(Path(args.sources).read_text()) if args.sources else None,
+            on_stage=lambda stage, values: print(
+                stage + (": needs attention" if values.get("errors") else ": complete")
+            ),
+        )
+    print(
+        f"Run {result['status']}: {len(result['ranked_listings'])} qualified matches, {len(result['new_matches'])} new/changed"
     )
-
-    # ── Parsed Resume ───────────────────────────────────────────────────────────
-    resume_data = result.get("resume_data")
-    if resume_data:
-        console.print(Rule("[bold]Parsed Resume[/bold]"))
-        console.print(f"  [bold]Name[/bold]            : {resume_data['name']}")
-        console.print(f"  [bold]Current role[/bold]    : {resume_data['current_role']}")
-        console.print(f"  [bold]Experience[/bold]      : {resume_data['years_experience']} year(s)")
-        console.print(f"  [bold]Inferred field[/bold]  : {resume_data['inferred_field']}")
-        console.print(f"  [bold]Seniority[/bold]       : {resume_data['seniority_level']}")
-        console.print(f"  [bold]Skills[/bold]          : {', '.join(resume_data['skills'])}")
-        console.print(f"  [bold]Stack[/bold]           : {', '.join(resume_data['stack'])}")
-    else:
-        console.print("[red]No resume data extracted.[/red]")
-
-    # ── Companies Targeted ──────────────────────────────────────────────────────
-    companies = result.get("companies", [])
-    if companies:
-        console.print()
-        console.print(Rule(f"[bold]{len(companies)} Companies Targeted[/bold]"))
-        for c in companies:
-            console.print(f"  [cyan]•[/cyan] {c['name']}  [dim]→[/dim]  [link={c['career_url']}]{c['career_url']}[/link]")
-
-    # ── Ranked Job Listings ─────────────────────────────────────────────────────
-    ranked = result.get("ranked_listings", [])
-    listings = result.get("job_listings", [])
-    display_listings = ranked if ranked else listings
-
-    if display_listings:
-        console.print()
-        label = "Top Ranked" if ranked else "Relevant"
-        console.print(Rule(f"[bold]{len(display_listings)} {label} Job Listing(s)[/bold]"))
-        for j in display_listings:
-            score_str = f"  [bold green]Score: {j['score']}/12[/bold green]" if "score" in j else ""
-            console.print()
-            console.print(f"  [bold][{j['company']}][/bold]  {j['title']}{score_str}")
-            console.print(f"  Location    : {j['location']}")
-            console.print(f"  URL         : [link={j['url']}]{j['url']}[/link]")
-            if j.get("description"):
-                console.print(f"  Description : {j['description'][:160]}...")
-            if "score_reason" in j and j["score_reason"]:
-                console.print(f"  [dim]Why        : {j['score_reason']}[/dim]")
-    else:
-        console.print()
-        console.print("  [yellow]No relevant job listings found.[/yellow]")
-
-    # ── Outreach Drafts ─────────────────────────────────────────────────────────
-    drafts = result.get("outreach_drafts", [])
-    if drafts:
-        console.print()
-        console.print(Rule(f"[bold]{len(drafts)} Outreach Draft(s)[/bold]"))
-        for d in drafts:
-            console.print()
-            console.print(f"  [bold cyan][{d['company']}][/bold cyan]  {d['title']}")
-            console.print()
-            for line in d["message"].splitlines():
-                console.print(f"    {line}")
-            console.print()
-            console.print("  " + "─" * 60)
-
-    # ── Errors ──────────────────────────────────────────────────────────────────
-    errors = result.get("errors", [])
-    if errors:
-        console.print()
-        console.print(Rule(f"[bold red]{len(errors)} Error(s)[/bold red]"))
-        for e in errors:
-            console.print(f"  [red]![/red] {e}")
-
-    # ── Stale listing cleanup ───────────────────────────────────────────────────
-    try:
-        cleaned = clean_stale_listings(run_id)
-        if cleaned:
-            console.print(f"\n  [dim]Cleaned {cleaned} stale listing(s) from previous runs.[/dim]")
-    except Exception:
-        pass
-
-    # ── Optional JSON output ────────────────────────────────────────────────────
+    for job in result["ranked_listings"]:
+        print(f"  {job['score']}/12 | {job['company']} | {job['title']} | {job['location']}\n  {job['url']}")
+    for error in result["errors"]:
+        print("Attention: " + error)
     if args.output:
-        output_data = {
-            "run_id": run_id,
-            "resume": resume_data,
-            "companies": companies,
-            "ranked_listings": ranked or listings,
-            "outreach_drafts": drafts,
-            "errors": errors,
-        }
-        out_path = Path(args.output)
-        out_path.write_text(json.dumps(output_data, indent=2), encoding="utf-8")
-        console.print(f"\n  [green]Results saved to[/green] {out_path.resolve()}")
-
-    console.print()
-    console.print(Rule())
+        Path(args.output).parent.mkdir(parents=True, exist_ok=True)
+        Path(args.output).write_text(json.dumps(result, indent=2), encoding="utf-8")
+    if args.digest:
+        lines = ["# Job Intel digest", f"Run status: {result['status']}", ""]
+        for job in result["new_matches"]:
+            lines.extend(
+                [
+                    f"- [{job['company']} — {job['title']}]({job['url']}) · {job['score']}/12",
+                    f"  {job['score_reason']}",
+                ]
+            )
+        if not result["new_matches"]:
+            lines.append(
+                "No new qualified matches. Check run status and source coverage before interpreting this as no openings."
+            )
+        Path(args.digest).parent.mkdir(parents=True, exist_ok=True)
+        Path(args.digest).write_text("\n".join(lines), encoding="utf-8")
+    return 1 if result["status"] == "failed" else 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

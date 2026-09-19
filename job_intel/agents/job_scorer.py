@@ -1,115 +1,115 @@
-"""Agent: score and rank job listings by relevance to the candidate's profile."""
+"""Evidence-backed scores with eligibility gates and profile/content caching."""
+
 from __future__ import annotations
-
 import asyncio
-import logging
-from typing import List, Tuple
+from job_intel.core.models import SearchProfile, Assessment, fingerprint
+from job_intel.core.llm import generate, model_identity, current
+from job_intel.core.matching import geography, plausible_role, contains
+from job_intel.db.store import cached_score, save_score, history
 
-from langchain_anthropic import ChatAnthropic
-
-from job_intel.core.llm import extract_json_object, get_llm, invoke_text
-from job_intel.core.state import AgentState, JobListing, RankedJobListing, ResumeData
-
-_log = logging.getLogger(__name__)
-
-_MAX_LLM = 3   # concurrent scoring calls
-_TOP_N = 5     # how many top listings to surface
+SCORER_VERSION = "evidence-v1"
 
 
-def _score_listing(
-    listing: JobListing,
-    resume: ResumeData,
-    llm: ChatAnthropic,
-) -> Tuple[int, str]:
-    """Ask Claude to score a single listing against the candidate profile.
-
-    Returns (score, score_reason) where score is 0–12.
-    """
-    skills_str = ", ".join(resume["skills"])
-    stack_str = ", ".join(resume["stack"])
-
-    prompt = f"""You are a career advisor scoring a job listing for a candidate.
-
-CANDIDATE PROFILE:
-- Current role    : {resume["current_role"]}
-- Inferred field  : {resume["inferred_field"]}
-- Seniority level : {resume["seniority_level"]}
-- Skills          : {skills_str}
-- Stack           : {stack_str}
-- Target location : (see listing)
-
-JOB LISTING:
-- Company     : {listing["company"]}
-- Title       : {listing["title"]}
-- Location    : {listing["location"]}
-- Description : {listing["description"]}
-
-Score this listing on four dimensions (0–3 each, total 0–12):
-
-1. title_match   : How closely does the job title align with the candidate's current role / inferred field?
-                   3=direct match, 2=very related, 1=somewhat related, 0=unrelated
-2. skill_overlap : How many of the candidate's skills appear in the description?
-                   3=strong overlap (5+), 2=moderate (2-4), 1=minor (1), 0=none
-3. location_fit  : Location suitability.
-                   3=exact city match, 2=Remote/Hybrid/Anywhere, 1=other India city, 0=no match
-4. seniority_fit : Does the required seniority match?
-                   3=exact match, 2=one level off, 1=two levels off, 0=completely mismatched
-
-Output ONLY a JSON object — no prose:
-{{
-  "title_match": <0-3>,
-  "skill_overlap": <0-3>,
-  "location_fit": <0-3>,
-  "seniority_fit": <0-3>,
-  "reason": "<one concise sentence explaining the total score>"
-}}"""
-
-    try:
-        data = extract_json_object(invoke_text(llm, prompt))
-        if data is None:
-            return 0, "Could not parse score"
-        score = (
-            int(data.get("title_match", 0))
-            + int(data.get("skill_overlap", 0))
-            + int(data.get("location_fit", 0))
-            + int(data.get("seniority_fit", 0))
-        )
-        score = max(0, min(12, score))
-        reason = str(data.get("reason", "")).strip()
-        return score, reason
-    except Exception as exc:
-        _log.debug("Scoring failed for %s @ %s: %s", listing["title"], listing["company"], exc)
-        return 0, f"Scoring error: {exc}"
+def _score(job, resume, profile):
+    stable = {k: v for k, v in job.items() if k not in ("scraped_at", "updated_at")}
+    cache_key = fingerprint([stable, resume, profile.model_dump(), model_identity(), SCORER_VERSION])
+    cached = cached_score(profile.profile_id, job["id"], cache_key)
+    if cached:
+        return {**cached, **job, "cached": True}
+    eligibility, location_score, location_reason = geography(job, profile)
+    result = {
+        **job,
+        "score": None,
+        "assessment_status": "needs_review",
+        "eligibility": eligibility,
+        "score_reason": location_reason,
+        "cached": False,
+    }
+    if eligibility == "ineligible" or not plausible_role(job, profile):
+        result.update(assessment_status="ineligible", eligibility="ineligible")
+    elif eligibility == "review" or len(job.get("description", "")) < 150:
+        result["score_reason"] += "; full description and location evidence are required"
+    else:
+        try:
+            assessment = generate(
+                Assessment,
+                "Assess relevance for the TARGET roles, not just the candidate's current title. Each dimension is 0–3: title (direct=3, adjacent=2, weak=1, unrelated=0), skills (strong=3, moderate=2, minor=1, absent=0), seniority (matched responsibility=3, acceptable stretch=2, large gap=1, incompatible=0). For each nonzero dimension, evidence must be a short EXACT quote from the job title or description. For zero scores explain absent evidence. Do not manufacture matches. Respect allow_stretch. Report missing requirements and uncertainty. Location is assessed separately by code.",
+                {
+                    "candidate": resume,
+                    "preferences": profile.model_dump(),
+                    "job": {"title": job["title"], "description": job["description"][:14000]},
+                },
+            )
+            evidence_source = (job["title"] + " " + job["description"]).casefold()
+            for dimension in (assessment.title_match, assessment.skill_overlap, assessment.seniority_fit):
+                if dimension.score and dimension.evidence.casefold() not in evidence_source:
+                    raise ValueError("Score evidence is not present in the posting")
+            missing = [skill for skill in profile.must_have_skills if not contains(job["description"], skill)]
+            dimensions = assessment.model_dump()
+            dimensions["location_fit"] = {"score": location_score, "evidence": location_reason}
+            result.update(
+                score=location_score
+                + assessment.title_match.score
+                + assessment.skill_overlap.score
+                + assessment.seniority_fit.score,
+                dimensions=dimensions,
+                score_reason=assessment.reason,
+                assessment_status="scored",
+                uncertainties=assessment.uncertainties,
+                missing_must_haves=missing,
+            )
+            if missing or not job.get("description_complete", False):
+                result.update(assessment_status="needs_review", eligibility="review")
+                result["score_reason"] += "; verify incomplete source or missing must-have skills"
+        except Exception:
+            result.update(
+                assessment_status="scoring_failed",
+                score_reason="Could not obtain a validated, evidence-backed score",
+            )
+    if result["assessment_status"] != "scoring_failed":
+        save_score(profile.profile_id, result, cache_key)
+    return result
 
 
-async def _score_all(
-    listings: List[JobListing],
-    resume: ResumeData,
-) -> List[RankedJobListing]:
-    llm = get_llm()
-    sem = asyncio.Semaphore(_MAX_LLM)
+async def _score_all(jobs, resume, profile):
+    sem = asyncio.Semaphore(3)
 
-    async def _score_one(listing: JobListing) -> RankedJobListing:
+    async def one(job):
         async with sem:
-            score, reason = await asyncio.to_thread(_score_listing, listing, resume, llm)
-        return RankedJobListing(**listing, score=score, score_reason=reason)
+            return await asyncio.to_thread(_score, job, resume, profile)
 
-    ranked = await asyncio.gather(*[_score_one(l) for l in listings])
-    return sorted(ranked, key=lambda r: r["score"], reverse=True)
+    return await asyncio.gather(*(one(j) for j in jobs))
 
 
-def score_jobs_node(state: AgentState) -> dict:
-    """LangGraph node: score every job listing and return a ranked shortlist."""
-    listings: List[JobListing] = state.get("job_listings", [])
-    resume: ResumeData = state.get("resume_data", {})
-
-    if not listings:
-        _log.info("No listings to score.")
-        return {"ranked_listings": []}
-
-    _log.info("Scoring %d listing(s)...", len(listings))
-    ranked = asyncio.run(_score_all(listings, resume))
-    top = ranked[:_TOP_N]
-    _log.info("Top score: %d/12  (%s @ %s)", top[0]["score"], top[0]["title"], top[0]["company"])
-
-    return {"ranked_listings": top}
+def score_jobs_node(state):
+    profile = SearchProfile.model_validate(state["profile"])
+    statuses = {j["id"]: j["status"] for j in history(profile.profile_id)}
+    jobs = [
+        j
+        for j in state.get("job_listings", [])
+        if statuses.get(j["id"], "new") not in ("rejected", "applied", "interview", "offer", "closed")
+        and plausible_role(j, profile)
+    ]
+    jobs.sort(key=lambda j: (geography(j, profile)[0] != "eligible", -geography(j, profile)[1], j["id"]))
+    config = current()
+    available = max(0, config.max_calls - config.calls - profile.draft_top_n)
+    selected = jobs[: min(profile.max_jobs_to_score, available)]
+    scored = asyncio.run(_score_all(selected, state["resume_data"], profile))
+    ranked = sorted(
+        [
+            j
+            for j in scored
+            if j["assessment_status"] == "scored"
+            and j["eligibility"] == "eligible"
+            and j["score"] >= profile.min_score
+        ],
+        key=lambda j: (-j["score"], j["id"]),
+    )[: profile.top_n]
+    errors = [
+        f"Scoring failed for {j['company']}: {j['title']}"
+        for j in scored
+        if j["assessment_status"] == "scoring_failed"
+    ]
+    if len(jobs) > len(selected):
+        errors.append(f"Scoring budget reached: {len(jobs) - len(selected)} plausible jobs remain unscored")
+    return {"scored_listings": scored, "ranked_listings": ranked, "errors": errors}
