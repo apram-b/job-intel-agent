@@ -1,0 +1,20 @@
+profile_id: personal
+primary_roles: [Senior Data Engineer, MLOps Engineer]
+secondary_roles: [ML Platform Engineer, ML Infrastructure Engineer]
+stretch_roles: [Lead Data Engineer, Lead ML Platform Engineer]
+excluded_roles: [intern, internship, junior, graduate, trainee]
+preferred_cities: [Gurgaon, Delhi NCR]
+secondary_cities: [Bangalore, Hyderabad, Pune]
+allow_india_remote: true
+allow_stretch: true
+seniority: [senior, lead]
+work_modes: [remote, hybrid, onsite]
+must_have_skills: []
+preferred_skills: [Python, AWS, MLflow, Airflow, SageMaker]
+priority_weights: {fit: 0.50, confidence: 0.25, strategy: 0.25}
+strategic_weights: {platform: 0.30, ownership: 0.25, leadership: 0.15, scope: 0.15, company: 0.15}
+close_after_scans: 3
+close_after_hours: 72
+apply_fit: 70
+apply_confidence: 60
+max_jobs_to_score: 40

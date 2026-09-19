@@ -1,0 +1,14 @@
+{
+  "profile_id": "personal",
+  "target_roles": ["Senior Data Engineer", "MLOps Engineer", "ML Platform Engineer", "ML Infrastructure Engineer"],
+  "preferred_cities": ["Gurgaon", "Delhi NCR"],
+  "secondary_cities": ["Bangalore", "Hyderabad", "Pune"],
+  "allow_india_remote": true,
+  "allow_stretch": true,
+  "must_have_skills": [],
+  "preferred_skills": ["Python", "AWS", "MLflow", "Airflow", "SageMaker"],
+  "min_score": 8,
+  "max_jobs_to_score": 40,
+  "top_n": 10,
+  "draft_top_n": 0
+}

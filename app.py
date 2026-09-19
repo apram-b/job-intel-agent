@@ -1,237 +1,303 @@
-"""Streamlit front-end for the job-intel pipeline.
+"""Local-first Streamlit UI. Public mode requires verified OIDC sign-in."""
 
-Usage:
-    streamlit run app.py
-"""
 from __future__ import annotations
-
+import json
+import os
 import tempfile
-import time
-import uuid
 from pathlib import Path
-
 import streamlit as st
 from dotenv import load_dotenv
-
-from job_intel.core.graph import build_graph
-from job_intel.db.store import clean_stale_listings
+from job_intel.core import access
+from job_intel.core.models import SearchProfile, Source
+from job_intel.core.llm import settings
+from job_intel.core.pipeline import run_pipeline
+from job_intel.core.public import run_public
+from job_intel.db import store
+from job_intel.core.presentation import public_result
 
 load_dotenv()
+st.set_page_config(page_title="Job Intel", page_icon="🔎", layout="wide")
 
-st.set_page_config(page_title="Job Intel Agent", page_icon="●", layout="centered")
 
-# JetBrains Mono everywhere. Material icon spans keep their own font-family
-# (their class rules are more specific), so icons are unaffected.
-st.markdown(
-    """<style>
-    @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&display=swap');
-    html, body, p, h1, h2, h3, h4, h5, h6, li, span, label,
-    button, input, textarea, code, pre,
-    div[data-testid="stMarkdownContainer"],
-    div[data-testid="stMetricValue"],
-    div[data-testid="stMetricLabel"] {
-        font-family: 'JetBrains Mono', monospace;
-    }
+def render_theme():
+    light = st.sidebar.toggle("Light mode", value=False, key="light_mode")
+    bg, surface, text, muted, border, accent = (
+        ("#F7F9FC", "#FFFFFF", "#17212D", "#526171", "#D4DDE7", "#176B58")
+        if light
+        else ("#0E1117", "#171E29", "#F0F4F8", "#B0BDCE", "#364152", "#65D6B4")
+    )
+    st.markdown(
+        f"""<style>
+    .stApp, [data-testid="stAppViewContainer"], [data-testid="stHeader"],
+    [data-testid="stSidebar"], [data-testid="stSidebarContent"] {{
+        background: {bg}; color: {text}; color-scheme: {"light" if light else "dark"};
+        --text-color: {text}; --background-color: {bg}; --secondary-background-color: {surface};
+    }}
+    .stApp h1, .stApp h2, .stApp h3, .stApp p, .stApp label,
+    .stApp summary, .stApp [data-testid="stWidgetLabel"], .stApp [role="tab"] {{ color: {text}; }}
+    .stApp [data-testid="stCaptionContainer"] p {{ color: {muted}; }}
+    .stApp input, .stApp textarea, .stApp [data-baseweb="input"],
+    .stApp [data-baseweb="base-input"], .stApp [data-baseweb="select"] > div,
+    .stApp [data-testid="stFileUploaderDropzone"], [role="listbox"], [role="option"] {{
+        background: {surface}; color: {text};
+    }}
+    .stApp button[kind="secondary"], .stApp a[kind="secondary"] {{
+        background: {surface}; color: {text}; border-color: {border};
+    }}
+    .stApp [data-testid="stExpander"] details,
+    .stApp [data-testid="stVerticalBlockBorderWrapper"] {{ border-color: {border}; }}
+    .stApp [data-testid="stExpander"] summary {{ background: {surface}; color: {text}; }}
+    .stApp a {{ color: {accent}; }}
     </style>""",
-    unsafe_allow_html=True,
-)
-
-# Pipeline nodes in execution order, with UI labels
-_STAGES = [
-    ("parse_resume", "Parsing resume"),
-    ("find_companies", "Finding companies"),
-    ("scrape_careers", "Scraping career pages"),
-    ("score_jobs", "Scoring listings"),
-    ("draft_outreach", "Drafting outreach"),
-]
-
-
-# Total pipeline runs allowed for tunnel visitors while this server is up.
-# Localhost (the operator) is exempt. Resets on server restart.
-_MAX_PUBLIC_RUNS = 10
-
-
-@st.cache_resource
-def _public_run_counter() -> dict:
-    """Shared across all sessions for the lifetime of the server process."""
-    return {"count": 0}
-
-
-def _is_local_viewer() -> bool:
-    """True when the browser is hitting localhost directly (the operator).
-
-    Visitors arriving through a tunnel/proxy carry that domain in the Host
-    header, so debug details like scraper errors stay hidden from them.
-    """
-    try:
-        host = st.context.headers.get("Host", "")
-    except Exception:
-        return True
-    return host.split(":")[0] in ("localhost", "127.0.0.1")
-
-
-def _fmt_secs(seconds: float) -> str:
-    if seconds >= 60:
-        return f"{int(seconds // 60)}m {int(seconds % 60)}s"
-    return f"{seconds:.1f}s"
-
-
-def _run_pipeline(resume_path: str, location: str) -> dict:
-    """Stream the graph node-by-node, updating a status widget per stage."""
-    run_id = str(uuid.uuid4())
-    graph = build_graph()
-
-    state = {
-        "resume_path": resume_path,
-        "location": location,
-        "run_id": run_id,
-        "companies": [],
-        "job_listings": [],
-        "ranked_listings": [],
-        "outreach_drafts": [],
-        "errors": [],
-    }
-
-    result: dict = dict(state)
-    stage_labels = dict(_STAGES)
-    node_order = [name for name, _ in _STAGES]
-
-    t_start = time.perf_counter()
-    t_stage = t_start
-
-    with st.status(f"{_STAGES[0][1]}…", expanded=True) as status:
-        for update in graph.stream(state, stream_mode="updates"):
-            for node_name, node_output in update.items():
-                if node_output:
-                    # errors accumulate; everything else overwrites
-                    errs = node_output.get("errors")
-                    if errs:
-                        result["errors"] = result.get("errors", []) + errs
-                    for k, v in node_output.items():
-                        if k != "errors":
-                            result[k] = v
-
-                now = time.perf_counter()
-                label = stage_labels.get(node_name, node_name)
-                st.write(f"✓ {label} — {_fmt_secs(now - t_stage)}")
-                t_stage = now
-
-                # Show the next stage as running, with total elapsed time
-                try:
-                    next_label = _STAGES[node_order.index(node_name) + 1][1]
-                    status.update(
-                        label=f"{next_label}… ({_fmt_secs(now - t_start)} elapsed)"
-                    )
-                except (ValueError, IndexError):
-                    pass
-
-        total = time.perf_counter() - t_start
-        status.update(
-            label=f"Pipeline complete in {_fmt_secs(total)}",
-            state="complete",
-            expanded=True,
-        )
-
-    try:
-        cleaned = clean_stale_listings(run_id)
-        if cleaned:
-            st.caption(f"Cleaned {cleaned} stale listing(s) from previous runs.")
-    except Exception:
-        pass
-
-    return result
-
-
-def _render_results(result: dict) -> None:
-    resume = result.get("resume_data")
-    if resume:
-        st.subheader("Parsed Resume")
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Name", resume["name"])
-        c2.metric("Experience", f"{resume['years_experience']} yrs")
-        c3.metric("Seniority", resume["seniority_level"])
-        c4.metric("Field", resume["inferred_field"])
-        st.markdown(f"**Current role:** {resume['current_role']}")
-        st.markdown(f"**Skills:** {', '.join(resume['skills'])}")
-        st.markdown(f"**Stack:** {', '.join(resume['stack'])}")
-        st.divider()
-
-    companies = result.get("companies", [])
-    if companies:
-        with st.expander(f"{len(companies)} Companies Targeted"):
-            for c in companies:
-                st.markdown(f"- [{c['name']}]({c['career_url']})")
-
-    ranked = result.get("ranked_listings", [])
-    listings = ranked if ranked else result.get("job_listings", [])
-    if listings:
-        st.subheader(f"{len(listings)} {'Top Ranked' if ranked else 'Relevant'} Job Listing(s)")
-        for j in listings:
-            score_badge = f" — {j['score']}/12" if "score" in j else ""
-            with st.container(border=True):
-                st.markdown(f"#### {j['title']}{score_badge}")
-                st.markdown(f"**{j['company']}** · {j['location']}")
-                st.link_button("View listing →", j["url"])
-                if j.get("description"):
-                    with st.expander("Description"):
-                        st.write(j["description"])
-                if j.get("score_reason"):
-                    st.caption(j["score_reason"])
-    else:
-        st.markdown("*No relevant job listings found.*")
-
-    drafts = result.get("outreach_drafts", [])
-    if drafts:
-        st.subheader(f"{len(drafts)} Outreach Draft(s)")
-        for d in drafts:
-            st.markdown(f"**{d['company']}** — {d['title']}")
-            st.code(d["message"], language=None, wrap_lines=True)
-
-    errors = result.get("errors", [])
-    if errors and _is_local_viewer():
-        with st.expander(f"{len(errors)} error(s)"):
-            for e in errors:
-                st.text(f"- {e}")
-
-
-def main() -> None:
-    st.title("Job Intel Agent")
-    st.caption(
-        "Upload your resume, pick a location — the agents find companies, scrape "
-        "career pages, rank the best-fit roles, and draft your outreach."
+        unsafe_allow_html=True,
     )
 
-    with st.container(border=True):
-        uploaded = st.file_uploader("Resume (PDF)", type=["pdf"])
-        location = st.text_input("Target location", placeholder='e.g. "Bangalore"')
-        run = st.button("Find Jobs", type="primary", use_container_width=True,
-                        disabled=not (uploaded and location.strip()))
 
-    if run and uploaded and location.strip():
-        # Enforce the public run budget (operator on localhost is exempt)
-        if not _is_local_viewer():
-            counter = _public_run_counter()
-            if counter["count"] >= _MAX_PUBLIC_RUNS:
-                st.markdown(
-                    "*The demo has reached its run limit for now — "
-                    "please try again later.*"
-                )
-                st.stop()
-            counter["count"] += 1
+def main():
+    public = os.getenv("JOB_INTEL_MODE", "local") == "public"
+    if not public and st.get_option("server.address") not in ("localhost", "127.0.0.1", "::1"):
+        st.error(
+            "Local mode requires a loopback server address. Configure public mode and sign-in before exposing this app."
+        )
+        st.stop()
+    render_theme()
+    st.title("Job Intel")
+    st.caption("Find relevant roles. Keep the evidence. Track your next move.")
+    if not public:
+        workspace = st.sidebar.radio("Workspace", ["Daily queue", "Legacy search"], index=0)
+        if workspace == "Daily queue":
+            from job_intel.v2.ui import render
 
-        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
-            tmp.write(uploaded.getvalue())
-            tmp_path = tmp.name
+            render()
+            return
+    claims, user_id = {}, "personal"
+    if public:
+        issuer = os.getenv("JOB_INTEL_OIDC_ISSUER", "")
+        if not issuer:
+            st.error("Public sign-in is not configured. Contact the owner.")
+            st.stop()
+        if not st.user.is_logged_in:
+            st.info("Sign in for three free searches. After that, continue with your own API key.")
+            if st.button("Sign in"):
+                st.login()
+            st.stop()
+        claims = dict(st.user)
         try:
-            result = _run_pipeline(tmp_path, location.strip())
-            st.session_state["result"] = result
-        finally:
-            Path(tmp_path).unlink(missing_ok=True)
+            user_id = access.identity(claims, issuer)
+        except access.AccessDenied as exc:
+            st.error(str(exc))
+            if st.button("Sign out"):
+                st.logout()
+            st.stop()
+        if st.session_state.get("identity") != user_id:
+            for session_key in list(st.session_state):
+                if session_key != "light_mode":
+                    del st.session_state[session_key]
+            st.session_state["identity"] = user_id
+        if st.sidebar.button("Sign out"):
+            st.session_state.clear()
+            st.logout()
+        st.sidebar.caption(f"{access.remaining(user_id)} of 3 free runs remaining")
+    diagnostics = not public or access.is_admin(user_id)
+    if public and diagnostics:
+        if st.sidebar.toggle("Admin view", value=False):
+            st.subheader("Administration")
+            overview = access.admin_overview(user_id)
+            for title, rows in overview.items():
+                with st.expander(title.capitalize(), expanded=title == "runs"):
+                    st.dataframe(rows, use_container_width=True)
+    if st.session_state.pop("clear_key", False):
+        st.session_state.pop("own_key", None)
+    search_tab, history_tab = st.tabs(["Find jobs", "Saved history"])
+    with search_tab:
+        with st.expander("Search preferences", expanded=True):
+            roles = st.text_input("Target roles", value=", ".join(SearchProfile().target_roles))
+            left, right = st.columns(2)
+            cities = left.text_input("Preferred cities", value="Gurgaon, Delhi NCR")
+            secondary = right.text_input(
+                "Other cities you would consider", value="Bangalore, Hyderabad, Pune"
+            )
+            remote = left.checkbox("Include remote roles eligible in India", value=True)
+            stretch = right.checkbox("Include reasonable seniority stretch roles", value=True)
+            must = left.text_input("Must-have skills", help="Missing evidence sends a job to manual review")
+            minimum = right.slider("Minimum fit score", 0, 12, 8)
+            drafts = left.checkbox("Prepare outreach drafts for the best two matches", value=False)
+        with st.expander("Career sources (optional)"):
+            st.caption(
+                "One employer and career URL per line, separated by |. Greenhouse and Lever boards provide the most reliable coverage. Leave blank to discover sources."
+            )
+            source_text = st.text_area("Sources", placeholder="Employer | https://jobs.lever.co/board-name")
+        upload = st.file_uploader(
+            "Your resume", type=["pdf"], help="Text-based PDF, maximum 5 MB and 10 pages"
+        )
+        funding, provider, key = "own", os.getenv("JOB_INTEL_PROVIDER", "openai"), None
+        if public:
+            options = (
+                ["Use a free run", "Use my own API key"]
+                if access.remaining(user_id) > 0
+                else ["Use my own API key"]
+            )
+            choice = st.radio("How to run this search", options)
+            funding = "sponsored" if choice == "Use a free run" else "own"
+        if not public or funding == "own":
+            provider = st.selectbox("Model provider", ["openai", "anthropic"])
+            key = st.text_input(
+                "Your API key" if public else "API key (optional if configured locally)",
+                type="password",
+                key="own_key",
+            )
+            st.caption(
+                "Your key is held only in server session memory and used for this provider. It is not saved to the job database. Clear it with the button below."
+            )
+            if st.button("Clear API key"):
+                st.session_state["clear_key"] = True
+                st.rerun()
+        consent = st.checkbox(
+            "I understand my resume and selected job text are sent to the selected model provider, and my job history is stored by this app."
+        )
+        if public:
+            st.caption(
+                "A free run is consumed when a valid search starts, including failed or interrupted searches. Refreshing does not refund it. Shared daily limits may apply."
+            )
+        start = st.button("Find matching jobs", type="primary", disabled=not upload or not consent)
+        if start:
 
-    if "result" in st.session_state:
-        _render_results(st.session_state["result"])
-    elif not run:
-        st.markdown("*Upload a resume PDF and enter a location above to get started.*")
+            def split(value):
+                return [x.strip() for x in value.split(",") if x.strip()]
+
+            try:
+                profile = SearchProfile(
+                    profile_id=user_id,
+                    target_roles=split(roles),
+                    preferred_cities=split(cities),
+                    secondary_cities=split(secondary),
+                    allow_india_remote=remote,
+                    allow_stretch=stretch,
+                    must_have_skills=split(must),
+                    min_score=minimum,
+                    draft_top_n=2 if drafts else 0,
+                )
+                sources = []
+                for line in source_text.splitlines():
+                    if line.strip():
+                        name, url = line.split("|", 1)
+                        sources.append(Source(name=name, career_url=url).model_dump())
+                if len(sources) > 15:
+                    raise ValueError("Use at most 15 career sources")
+                if upload.size > 5_000_000:
+                    raise ValueError("Resume must be smaller than 5 MB")
+                with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as file:
+                    file.write(upload.getvalue())
+                    path = file.name
+                try:
+                    st.session_state.pop("result", None)
+                    with st.status("Searching…", expanded=True) as progress:
+
+                        def stage(name, values):
+                            label = name.replace("_", " ").capitalize()
+                            st.write(
+                                label + (" — needs attention" if values.get("errors") else " — finished")
+                            )
+
+                        if public:
+                            result = run_public(
+                                claims,
+                                profile,
+                                resume_path=path,
+                                funding=funding,
+                                own_key=key,
+                                own_provider=provider,
+                                companies=sources,
+                                on_stage=stage,
+                            )
+                        else:
+                            result = run_pipeline(
+                                profile,
+                                settings(provider, key or None),
+                                resume_path=path,
+                                companies=sources,
+                                on_stage=stage,
+                            )
+                        progress.update(
+                            label="Search " + result["status"],
+                            state="complete" if result["status"] == "complete" else "error",
+                        )
+                    st.session_state["result"] = result
+                    st.session_state["clear_key"] = True
+                finally:
+                    Path(path).unlink(missing_ok=True)
+                st.rerun()
+            except (ValueError, access.AccessDenied) as exc:
+                st.error(str(exc))
+            except Exception:
+                st.error("Search could not start. Check the local configuration or contact the owner.")
+        result = st.session_state.get("result")
+        if result:
+            st.subheader(f"{len(result['ranked_listings'])} qualified matches")
+            st.caption(f"{len(result['new_matches'])} new or changed · Run {result['status']}")
+            with st.expander("Parsed resume — review for accuracy"):
+                st.json(result["resume_data"])
+            for job in result["ranked_listings"]:
+                with st.container(border=True):
+                    st.subheader(job["title"])
+                    st.write(f"{job['company']} · {job['location']} · {job['score']}/12")
+                    st.write(job["score_reason"])
+                    st.link_button("View job / Apply ↗", job["url"])
+                    with st.expander("Fit evidence"):
+                        st.json(job.get("dimensions", {}))
+            review = [j for j in result.get("scored_listings", []) if j.get("assessment_status") != "scored"]
+            with st.expander(f"Needs review or excluded ({len(review)})"):
+                for job in review:
+                    st.write(f"{job['company']} — {job['title']}: {job['score_reason']}")
+                    if job.get("url"):
+                        st.link_button("View job / Apply ↗", job["url"], key="review_" + job["id"])
+            if diagnostics:
+                with st.expander("Source coverage and run details"):
+                    st.json(result["source_checks"])
+                    for error in result["errors"]:
+                        st.warning(error)
+                    st.json(result["usage"])
+            elif result["status"] != "complete":
+                st.info("This search is incomplete. You can review the available jobs or try again later.")
+            for draft in result["outreach_drafts"]:
+                st.text_area(
+                    f"Draft: {draft['company']} — {draft['title']}",
+                    draft["message"],
+                    height=160,
+                    key="draft_" + draft["job_id"],
+                )
+            st.download_button(
+                "Download results",
+                json.dumps(result if diagnostics else public_result(result), indent=2),
+                "job-intel-results.json",
+                "application/json",
+            )
+    with history_tab:
+        items = store.history(user_id)
+        if not items:
+            st.info("Your job history will appear here after the first search.")
+        for job in items:
+            with st.expander(f"{job['company']} — {job['title']} · {job['status']}"):
+                st.write(job["location"])
+                st.link_button("View job / Apply ↗", job["url"], key="link_" + job["id"])
+                st.caption(
+                    f"First seen {job['first_seen'][:10]} · Last seen {job['last_seen'][:10]}. Absence from later searches does not mean closed."
+                )
+                with st.form("track_" + job["id"]):
+                    status = st.selectbox("Status", store.STATUSES, index=store.STATUSES.index(job["status"]))
+                    notes = st.text_area("Notes", value=job.get("notes") or "")
+                    follow = st.text_input("Follow-up date (YYYY-MM-DD)", value=job.get("follow_up") or "")
+                    if st.form_submit_button("Save"):
+                        try:
+                            store.set_status(user_id, job["id"], status, notes, follow or None)
+                            st.rerun()
+                        except ValueError:
+                            st.error("Use a valid follow-up date in YYYY-MM-DD format")
+        with st.expander("Recent searches"):
+            runs = store.recent_runs(user_id)
+            st.json(
+                runs if diagnostics else [{k: v for k, v in run.items() if k != "errors"} for run in runs]
+            )
 
 
 if __name__ == "__main__":

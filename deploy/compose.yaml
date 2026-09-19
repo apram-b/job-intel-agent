@@ -1,0 +1,47 @@
+name: job-intel
+services:
+  db:
+    image: postgres:16
+    restart: unless-stopped
+    mem_limit: 768m
+    environment:
+      POSTGRES_DB: job_intel
+      POSTGRES_USER: job_intel
+      POSTGRES_PASSWORD: ${JOB_INTEL_DB_PASSWORD:?Set a generated hexadecimal database password}
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U job_intel -d job_intel"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    logging:
+      driver: json-file
+      options: {max-size: "5m", max-file: "2"}
+  worker:
+    image: ${JOB_INTEL_IMAGE:?Set an immutable image tag or digest}
+    profiles: [tools]
+    mem_limit: 768m
+    environment:
+      JOB_INTEL_DATABASE_URL: postgresql+psycopg://job_intel:${JOB_INTEL_DB_PASSWORD}@db:5432/job_intel
+      JOB_INTEL_PROVIDER: ${JOB_INTEL_PROVIDER:-openai}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      JOB_INTEL_OPENAI_PRICED_MODEL: ${JOB_INTEL_OPENAI_PRICED_MODEL:-}
+      JOB_INTEL_OPENAI_INPUT_USD_PER_MILLION: ${JOB_INTEL_OPENAI_INPUT_USD_PER_MILLION:-}
+      JOB_INTEL_OPENAI_OUTPUT_USD_PER_MILLION: ${JOB_INTEL_OPENAI_OUTPUT_USD_PER_MILLION:-}
+      JOB_INTEL_ANTHROPIC_PRICED_MODEL: ${JOB_INTEL_ANTHROPIC_PRICED_MODEL:-}
+      JOB_INTEL_ANTHROPIC_INPUT_USD_PER_MILLION: ${JOB_INTEL_ANTHROPIC_INPUT_USD_PER_MILLION:-}
+      JOB_INTEL_ANTHROPIC_OUTPUT_USD_PER_MILLION: ${JOB_INTEL_ANTHROPIC_OUTPUT_USD_PER_MILLION:-}
+      JOB_INTEL_MONTHLY_MODEL_USD: "3"
+    depends_on:
+      db: {condition: service_healthy}
+    volumes:
+      - /opt/job-intel/shared:/app/data
+    logging:
+      driver: json-file
+      options: {max-size: "5m", max-file: "2"}
+volumes:
+  postgres:
